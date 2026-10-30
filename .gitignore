@@ -5,3 +5,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ipynb_checkpoints/
+
+# local tooling
+kaggle_out/
+kaggle.json
+*.mov
+*.mp4
+*.wav
