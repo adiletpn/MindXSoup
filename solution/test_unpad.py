@@ -65,9 +65,11 @@ def batch(left_padded=False):
     return ids, mask, labels
 
 
-def step(model, unpadded, ids, mask, labels):
-    from solution import fused_ce, unpad
+def step(model, unpadded, ids, mask, labels, recompute=False):
+    from solution import fused_ce, recompute as layer_recompute, unpad
 
+    layer_recompute.patch_qwen2_layer_recompute()
+    layer_recompute.enabled = recompute
     unpad.enabled = unpadded
     torch.manual_seed(123)  # the same dropout draws in both runs
     out = model(input_ids=ids, attention_mask=mask, labels=labels)
@@ -76,15 +78,17 @@ def step(model, unpadded, ids, mask, labels):
     grads = {n: p.grad.clone() for n, p in model.named_parameters() if p.requires_grad}
     model.zero_grad()
     unpad.enabled = True
+    layer_recompute.enabled = False
     return out.loss.detach(), entropy, token_loss, correct, labelled, grads
 
 
+@pytest.mark.parametrize("recompute", [False, True])
 @pytest.mark.parametrize("dropout", [0.0, 0.05])
-def test_unpadded_step_matches_padded(dropout):
+def test_unpadded_step_matches_padded(dropout, recompute):
     model = tiny_lora_qwen2(dropout)
     ids, mask, labels = batch()
     ref = step(model, False, ids, mask, labels)
-    got = step(model, True, ids, mask, labels)
+    got = step(model, True, ids, mask, labels, recompute)
     real = mask.bool()
     # the masked (padded) and per-row causal SDPA kernels round differently in the last fp32 bits,
     # which the fp16 head matmul can carry one fp16 step further
@@ -95,6 +99,16 @@ def test_unpadded_step_matches_padded(dropout):
     assert abs(int(got[3]) - int(ref[3])) <= 1  # correct argmax: a near-tie may flip
     for name, grad in ref[5].items():
         torch.testing.assert_close(got[5][name], grad, rtol=2e-3, atol=1e-5, msg=name)
+
+
+def test_recompute_alone_matches():
+    model = tiny_lora_qwen2(0.05)
+    ids, mask, labels = batch()
+    ref = step(model, False, ids, mask, labels)
+    got = step(model, False, ids, mask, labels, recompute=True)
+    torch.testing.assert_close(got[0], ref[0], rtol=1e-6, atol=1e-6)
+    for name, grad in ref[5].items():
+        torch.testing.assert_close(got[5][name], grad, rtol=1e-5, atol=1e-7, msg=name)
 
 
 def test_dropout_keeps_the_base_mask():

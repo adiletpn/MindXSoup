@@ -41,11 +41,11 @@ def layout(attention_mask):
 @contextlib.contextmanager
 def packed(lengths, batch, length, index):
     global _rows
-    _rows = (lengths, batch, length, index)
+    outer, _rows = _rows, (lengths, batch, length, index)
     try:
         yield
     finally:
-        _rows = None
+        _rows = outer
 
 
 def pack(x, index):
