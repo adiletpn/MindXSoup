@@ -85,4 +85,8 @@ def test_gpu_dtype_conversion_is_bit_identical():
     source = values.to(torch.bfloat16)
     cpu = source.to(torch.float16)
     gpu = source.cuda().to(torch.float16).cpu()
-    assert torch.equal(cpu.view(torch.int16), gpu.view(torch.int16))
+    # every number converts to the same bits; NaN stays NaN (its payload bits differ between
+    # CPU and GPU, and model weights hold no NaN)
+    nan = torch.isnan(cpu)
+    assert torch.equal(nan, torch.isnan(gpu))
+    assert torch.equal(cpu[~nan].view(torch.int16), gpu[~nan].view(torch.int16))

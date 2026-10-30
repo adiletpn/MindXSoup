@@ -124,7 +124,8 @@ def convert_dtype_on_gpu_at_load():
     checkpoint loaded in fp16 on a T4, that converts 1.5 B values on Kaggle's CPU before the copy
     (the largest item outside the training loop in a py-spy profile of our run). Copying the bf16
     bytes first (same size) and converting on the GPU gives the same values (IEEE round to
-    nearest even either way, tested bit for bit). Only tensors up to 64 MiB, so the GPU never holds
+    nearest even either way, tested bit for bit for every number; only NaN payloads could differ,
+    and weights hold no NaN). Only tensors up to 64 MiB, so the GPU never holds
     both copies of the 445 MiB embedding."""
     from transformers import core_model_loading as loading
 
