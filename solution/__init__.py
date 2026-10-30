@@ -10,6 +10,7 @@ from . import warmup
 from .attention import compile_qkv_rope, patch_qwen2_attention_fp16
 from .embedding import patch_fp16_embedding
 from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
+from .linear4bit import patch_bnb_linear4bit
 from .mlp import patch_qwen2_mlp_fp16
 from .nf4 import patch_bnb_nf4
 from .recompute import patch_qwen2_layer_recompute
@@ -27,6 +28,7 @@ FEATURES = {
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
+    "nf4_direct": True,      # Linear4bit: our unpack + F.linear directly, no bnb dispatch layers
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
     "attention_fp16": True,  # ours (teammate): fp16 q/k/v, one kernel for LoRA sum + RoPE + cast
@@ -59,6 +61,8 @@ def apply():
     if FEATURES["nf4"]:
         patch_bnb_nf4()
         jobs.append(warmup.compile_nf4)
+        if FEATURES["nf4_direct"]:
+            patch_bnb_linear4bit()
     if FEATURES["rope"]:
         patch_rope()
         jobs.append(warmup.compile_rope)
