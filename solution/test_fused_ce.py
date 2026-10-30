@@ -46,14 +46,17 @@ def test_fused_head_ce_matches_reference(shape, num_items):
     labels[-1, -2:] = -100        # padding at the end of the last row
     num = None if num_items is None else torch.tensor(num_items, device="cuda")
 
+    # Training runs under the fp16 GradScaler (initial scale 2**16); without it the reference's fp16
+    # logit gradients underflow, so both sides backpropagate the scaled loss, as the trainer does.
+    grad_scale = 2.0 ** 16
     ref_loss, ref_entropy, ref_token_loss, ref_correct, ref_labelled = reference(
         hidden, weight, labels, num)
-    ref_loss.backward()
+    (ref_loss * grad_scale).backward()
     ref_grad = hidden.grad.clone()
     hidden.grad = None
 
     loss, entropy, token_loss, correct, labelled = fused_head_ce(hidden, weight, labels, num)
-    loss.backward()
+    (loss * grad_scale).backward()
 
     torch.testing.assert_close(loss, ref_loss, rtol=1e-4, atol=1e-4)
     torch.testing.assert_close(entropy, ref_entropy, rtol=1e-3, atol=1e-3)
