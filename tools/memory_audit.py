@@ -1,4 +1,4 @@
-"""Audit one unpatched synthetic Qwen NF4/LoRA forward/backward on Kaggle T4.
+"""Audit one synthetic Qwen NF4/LoRA forward/backward on Kaggle T4.
 
 This is a diagnostic, not the official Soup benchmark: it omits trainer metrics,
 rewind, and optimizer state. Only metadata is retained by the recording hooks.
@@ -11,7 +11,10 @@ import importlib.metadata
 import json
 from pathlib import Path
 import re
+import sys
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def grouped(rows, key, size="bytes"):
@@ -40,14 +43,15 @@ def module_group(name, cls):
 
 
 def render(data):
-    lines = ["# Baseline saved-tensor memory audit", "", f"Status: {data['status']}",
-             f"Synthetic batch 4 x {data.get('seq_length', 512)}; unpatched NF4 + LoRA; MiB = bytes / 2^20.",
+    mode = 'solution' if data.get('apply_solution') else 'baseline'
+    lines = [f"# {mode.title()} saved-tensor memory audit", "", f"Status: {data['status']}",
+             f"Synthetic batch 4 x {data.get('seq_length', 512)}; {mode} NF4 + LoRA; MiB = bytes / 2^20.",
              "This excludes Soup trainer metrics, rewind and optimizer state; use the harness for official peaks.", ""]
     if data.get("error"):
         lines += [f"Error: {data['error']}", ""]
     for name, value in data.get("memory_mib", {}).items():
         lines.append(f"- {name}: {value:.3f} MiB")
-    records = data.get("saved_tensors", [])
+    records = data.get("saved_tensors", [])[:data.get("forward_save_events")]
     unique = {}
     for row in records:
         unique.setdefault((row["device"], row["data_ptr"]), row)
@@ -59,6 +63,7 @@ def render(data):
               f"Unique backing storages: {sum(storage.values()) / 2**20:.3f} MiB.",
               "Pointer totals use first-save attribution and can include frozen weights; they are not extra allocations.",
               "Views may share storage. Storage totals avoid counting those views twice; neither total equals peak VRAM."]
+    lines.append("Tables use forward save events only; backward recomputation saves are excluded.")
     tables = [("Saved tensors by module group", grouped(rows, "group")),
               ("Saved tensors by dtype", grouped(rows, "dtype")),
               ("Saved tensors by layer", grouped(rows, "layer")),
@@ -88,6 +93,10 @@ def audit(data):
         data["startup_s"][name] = time.perf_counter() - start
         return result
 
+    if data.get("apply_solution"):
+        solution = timed("import solution", lambda: importlib.import_module("solution"))
+        data["features"] = dict(solution.FEATURES)
+        timed("solution.apply", solution.apply)
     for module in ("torch", "transformers", "trl", "peft", "bitsandbytes", "soup_cli"):
         timed("import " + module, lambda m=module: importlib.import_module(m))
     import torch
@@ -156,8 +165,13 @@ def audit(data):
             torch.cuda.synchronize()
             memory["after_forward"] = torch.cuda.memory_allocated() / 2**20
             logits = outputs.logits
-            data["logits"] = {"dtype": str(logits.dtype), "shape": list(logits.shape),
-                              "mib": logits.numel() * logits.element_size() / 2**20}
+            data["logits"] = None if logits is None else {
+                "dtype": str(logits.dtype), "shape": list(logits.shape),
+                "mib": logits.numel() * logits.element_size() / 2**20}
+            data["forward_save_events"] = len(data["saved_tensors"])
+            data["parameters_after_forward"] = [{"name": n, "dtype": str(p.dtype),
+                "class": type(p).__name__, "bytes": p.numel() * p.element_size()}
+                for n, p in model.named_parameters()]
             data["loss"] = outputs.loss.item()
             outputs.loss.backward()
             torch.cuda.synchronize()
@@ -172,13 +186,14 @@ def audit(data):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=Path("/kaggle/working/out"))
+    parser.add_argument("--apply-solution", action="store_true")
     parser.add_argument("--seq-length", type=int, default=512,
                         help="Synthetic diagnostic length; shorter runs are not the requested 512-token audit")
     args = parser.parse_args()
     if not 1 < args.seq_length <= 512:
         parser.error("--seq-length must be between 2 and 512")
     args.out.mkdir(parents=True, exist_ok=True)
-    data = {"status": "running", "seq_length": args.seq_length,
+    data = {"status": "running", "seq_length": args.seq_length, "apply_solution": args.apply_solution,
             "startup_s": {}, "memory_mib": {}, "saved_tensors": []}
     try:
         audit(data)

@@ -66,3 +66,11 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 - `docs/startup_time.md`: diagnostic startup stages and official wall-minus-loop observations.
 - The existing captain-owned Kaggle launcher assumes a Unix executable path; on Windows it was imported and its `KAGGLE` variable set to the installed `Scripts/kaggle.exe`, without editing it.
 - The launcher does not propagate command failures; success above was verified from test logs and all ten entries in `checks.json`, not just Kaggle job status.
+
+
+### Round 2 Person A diagnostics - 2026-10-30
+
+- Solution source `5782a18`, audit branch `audit2`; no changes to solution, harness, task or tests.
+- Memory run: https://www.kaggle.com/code/ansargabit/ansargabit-audit2 (v1), three successful synthetic forward/backward processes on T4 with expandable_segments:True. Allocated peaks: baseline T384 11912.085 MiB, solution T384 3869.568 MiB, solution T512 4217.173 MiB. These are not official training peaks or rule-check results. Full tables: docs/memory_audit_solution.md.
+- Startup run: https://www.kaggle.com/code/ansargabit/ansargabit-startup2 (v2), all worker processes passed. Apply 17.516 s including lazy imports; three-kernel cold launch medians 2.776 s serial / 2.905 s with three threads. Details and limitations: docs/startup_time.md.
+- Submission notebook: prepared locally from templates/kaggle_notebook.ipynb with team REPO_URL and empty COMMIT. Public Save & Run All is PENDING: Computer Use native pipe unavailable and a repository-scoped Kaggle GITHUB_TOKEN secret is not yet configured. No public notebook link or official checks claimed. User needs to import the prepared notebook and resolve repository secret access with the captain if fine-grained organization access is unavailable.
