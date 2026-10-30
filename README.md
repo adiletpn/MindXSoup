@@ -67,6 +67,24 @@ cuBLAS (Triton's `tl.dot` does not use the T4's tensor cores).
   forward and backward, including a full Qwen2 training step padded vs. unpadded, with and without
   recomputation, and bit-identical results for the fp16 embedding.
 
+### Within the rules
+
+Every change is our own code in `solution/`; no Soup or TRL switch is changed. Where a rule or an
+organizer's answer covers a technique, it is cited here (rules: [docs/CHALLENGE.md](docs/CHALLENGE.md),
+"Rules"; organizers' answers: [docs/QA_NOTES.md](docs/QA_NOTES.md)).
+
+| Technique | Why it is allowed |
+|---|---|
+| Own Triton kernels, autograd functions, patches of transformers / peft / bitsandbytes / Soup | Rules, "Allowed"; QA 3, 15, 24, 34, 40 |
+| Head + loss without full logits; TRL metrics and the rewind per-row loss computed by our kernel and handed to Soup's `ChunkedStep` record | QA 5, 12, 13, 35; Soup's `stream_loss_chunk` switch stays off |
+| **Unpadding.** The real tokens of one batch are concatenated; attention runs separately per row (causal, position ids restart per row), so no row sees another; rows, batches, their order and the token count (`attention_mask` sum, collator untouched) are unchanged. Soup's / TRL's `packing` and `padding_free` switches stay off. | Rules: "Removing padding inside a batch in your own code is fine; mixing rows across batches is not"; QA 8 |
+| Recomputation of decoder layers with `torch.utils.checkpoint` in our patch | Rules, "Allowed: recomputation … in your own code (its time counts)"; QA 25; Soup's `gradient_checkpointing` stays off |
+| fp16 storage of activations that are fp16 numbers | Case brief, section 9 hints; QA 6, 32 |
+| Frozen tied embedding / `lm_head` kept in fp16 (never upcast; same values and compute dtypes) | QA 7, 17, 33, 42 |
+| Triton compilation in a thread of the measured process (no helper process, empty cache) | QA 18, 41, 46 |
+| Startup: one `packages_distributions()` scan, random fingerprint for in-memory `map`/`filter`, unused `sklearn`/`wandb` imports skipped, `TORCHDYNAMO_DISABLE` only while bitsandbytes is imported | QA 37, 45, 49; nothing stubbed in `sys.modules`, nothing reused between runs |
+| LoRA dropout | Same rate, same random masks as the base (drawn on the padded shape); QA 4 |
+
 ## How to run
 
 **Kaggle (the jury's way).** Open the public notebook above, or import
