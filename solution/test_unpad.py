@@ -70,6 +70,7 @@ def step(model, unpadded, ids, mask, labels, recompute=False):
 
     layer_recompute.patch_qwen2_layer_recompute()
     layer_recompute.enabled = recompute
+    layer_recompute.BUDGET_TOKENS = 0  # rerun every layer of the tiny batch
     unpad.enabled = unpadded
     torch.manual_seed(123)  # the same dropout draws in both runs
     out = model(input_ids=ids, attention_mask=mask, labels=labels)
@@ -79,6 +80,7 @@ def step(model, unpadded, ids, mask, labels, recompute=False):
     model.zero_grad()
     unpad.enabled = True
     layer_recompute.enabled = False
+    layer_recompute.BUDGET_TOKENS = 1024
     return out.loss.detach(), entropy, token_loss, correct, labelled, grads
 
 
@@ -135,3 +137,15 @@ def test_left_padding_and_full_rows_keep_the_padded_path():
     lengths, index = unpad.layout(torch.ones(2, 9, dtype=torch.long, device="cuda"))
     assert lengths == [9, 9] and index.numel() == 18
     assert unpad.layout(mask.cpu()) is None
+
+
+def test_layers_to_rerun():
+    from solution.recompute import layers_to_rerun
+
+    assert layers_to_rerun(800, 28, 1024) == 0
+    assert layers_to_rerun(1024, 28, 1024) == 0
+    assert layers_to_rerun(2048, 28, 1024) == 14
+    assert layers_to_rerun(1500, 28, 1024) == 9  # 19 layers x 1500 <= 28 x 1024
+    for n in range(1, 2049):
+        k = layers_to_rerun(n, 28, 1024)
+        assert (28 - k) * n <= 28 * 1024

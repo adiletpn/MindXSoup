@@ -1,4 +1,5 @@
-"""Keep only each decoder layer's input for backward and run the layer again there.
+"""Keep only a decoder layer's input for backward and run the layer again there, in as many
+layers as a batch needs to stay within a fixed activation budget.
 
 Without it every layer keeps its activations (attention inputs and outputs, the MLP's fp16
 gate/up, norms) from the forward until its backward: that is most of the peak. With it a layer
@@ -7,7 +8,14 @@ per step) and frees its activations again before the next layer. torch.utils.che
 the random generator state for the rerun, so LoRA dropout draws the same masks; a packed batch
 (unpad.py) reruns with its row layout. This is recomputation in our own patch: Soup's
 gradient_checkpointing switch stays off.
+
+The peak is set by the batches with the most real tokens; most batches are far shorter. A batch
+of N tokens reruns the first ceil(L * (1 - BUDGET_TOKENS / N)) of its L layers, so what the
+others keep never exceeds what all L layers keep for BUDGET_TOKENS tokens; batches up to
+BUDGET_TOKENS rerun nothing and cost no time.
 """
+
+import math
 
 import torch
 from torch.utils.checkpoint import checkpoint
@@ -15,6 +23,14 @@ from torch.utils.checkpoint import checkpoint
 from . import unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
+BUDGET_TOKENS = 1024  # activations kept as for this many tokens through every layer
+
+
+def layers_to_rerun(n_tokens, n_layers, budget=None):
+    budget = BUDGET_TOKENS if budget is None else budget
+    if n_tokens <= budget:
+        return 0
+    return min(n_layers, math.ceil(n_layers * (1.0 - budget / n_tokens)))
 
 
 def patch_qwen2_layer_recompute():
@@ -30,6 +46,12 @@ def patch_qwen2_layer_recompute():
     def forward(self, hidden_states, *args, **kwargs):
         if not (enabled and self.training and torch.is_grad_enabled() and isinstance(hidden_states, torch.Tensor)
                 and hidden_states.is_cuda and kwargs.get("past_key_values") is None):
+            return original(self, hidden_states, *args, **kwargs)
+        attn = getattr(self, "self_attn", None)
+        layer, n_layers = getattr(attn, "layer_idx", None), \
+            getattr(getattr(attn, "config", None), "num_hidden_layers", None)
+        if layer is None or n_layers is None or \
+                layer >= layers_to_rerun(hidden_states.shape[0] * hidden_states.shape[1], n_layers):
             return original(self, hidden_states, *args, **kwargs)
         rows = unpad._rows
 

@@ -26,7 +26,7 @@ FEATURES = {
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
     "unpad": True,           # pad tokens never enter the decoder; attention per row
-    "recompute": False,      # keep only layer inputs, rerun each layer in backward (memory for time)
+    "recompute": True,       # long batches rerun some layers in backward to cap the activations
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
 
