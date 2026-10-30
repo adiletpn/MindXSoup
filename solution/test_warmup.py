@@ -80,7 +80,7 @@ def test_nf4():
     import bitsandbytes as bnb
 
     from solution import warmup
-    from solution.nf4 import nf4_unpack_kernel, patch_bnb_nf4
+    from solution.nf4 import nf4_unpack_wide_kernel, patch_bnb_nf4
 
     patch_bnb_nf4()
 
@@ -98,7 +98,7 @@ def test_nf4():
                             requires_grad=True)
             layer(x).sum().backward()
 
-    check_no_recompile([nf4_unpack_kernel], warmup.compile_nf4, real)
+    check_no_recompile([nf4_unpack_wide_kernel], warmup.compile_nf4, real)
 
 
 def test_example_swiglu():
