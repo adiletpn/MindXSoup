@@ -127,14 +127,23 @@ run with a different `--seed`.
   changing model/data/batches/order/steps/LoRA (incl. dropout)/optimizer/schedule; new trainable
   params; changing Soup outputs; editing harness/tests/task; behaving differently under measurement
   or in tests; precompiled caches; copying kernel code.
-- Grey zones (ask organizers; keep a fallback that avoids them):
-  1. Setting `trainer._soup_chunked_step` (Soup's internal struct) from our code so rewind reads our
-     per-token losses. Fallback: none cheap — so ask early.
-  2. Our recomputation inside our autograd vs "gradient checkpointing switch". README explicitly
-     allows own recomputation → low risk.
-  3. Storing fp16 copies of tensors that were produced by fp16 matmuls → numerically lossless.
-  4. Storing the frozen tied embedding in fp16 (near-lossless: bf16 checkpoint values fit fp16
-     except subnormal-range values) → medium risk; phase 2 only.
+- Former grey zones — **all answered YES by the organizers at the Q&A (2026-10-30, see
+  docs/QA_NOTES.md)**, provided the checks pass:
+  1. Passing per-token losses to rewind through Soup's `ChunkedStep` / `_soup_chunked_step`
+     from our code (without enabling `stream_loss_chunk` in the config) — allowed.
+  2. Custom autograd Functions + monkeypatching transformers/peft for fusion and activation
+     storage — "the case is designed for this".
+  3. Storing saved activations compactly (fp16, even int8) and restoring them in backward — allowed.
+  4. fp16 copies of frozen fp32 weights, including the frozen tied embedding used by lm_head —
+     allowed.
+  5. Fused / chunked loss without materializing full logits — allowed, "the main memory reserve";
+     metrics must be computed at the same positions as the base.
+  6. Removing pad tokens in our own forward, also in MLP and norms — allowed; `num_tokens` is the
+     attention_mask sum and stays equal as long as the collator and attention_mask are untouched.
+- Q&A also confirmed: share denominator = total time of steps 3+, worst run counts; speed/memory
+  use the mean of the two runs per side; jury image = Python 3.13, torch 2.11, CUDA 12.8,
+  Triton 3.6.0; only the listed checks are automatic, plus the jury reads the code. Video and
+  presentation are not scored but still part of the submission.
 
 ---
 
