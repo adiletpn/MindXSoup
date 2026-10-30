@@ -297,3 +297,18 @@ Beating m = 2 is plausible for us (fp32→fp16 activations + fused CE + fp16 emb
    memory-bound Triton kernels.
 3. Memory: fp16 attention-block storage, fp16 embedding, check where the peak sits (memory audit).
 4. Speed: unpadding; background JIT compile in apply(); trim casts.
+
+### Q&A part 3 (13:32-13:52) — additions
+- `torch.utils.checkpoint` inside our patch is allowed (only Soup's `gradient_checkpointing` flag is
+  forbidden); recompute time counts. Inline-PTX mma inside our @triton.jit would also count.
+- Repo access: jury gets team repos through the platform; our own Kaggle notebook uses a read-only
+  `GITHUB_TOKEN` secret; the notebook must be public. Details promised in the chat.
+- Organizers' profile: ~30% GPU time GEMMs (compute-bound, fine), ~30% casts + small elementwise
+  (memory-bound; T4 ~320 GB/s vs 65 TFLOPS fp16) → fusing casts is the main speed reserve; logits
+  are the main memory reserve; do not lose time on compilation; base peak ~14 330 MiB.
+- Frozen lm_head/embedding: one fp16 copy per run is fine, and **keeping only the fp16 copy (dropping
+  fp32) is explicitly allowed** → −445 MB and no per-step cast. Do it (embedding lookup then returns
+  fp16 values; upcast to fp32 for the residual to keep base numerics).
+- Watch fp16 overflow when storing activations in fp16 (Qwen has large activation outliers):
+  only store in fp16 what was produced by fp16 matmuls, or check range.
+- Possibly per-region winners (unconfirmed) — captain to ask in the Decentrathon chat.
