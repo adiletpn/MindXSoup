@@ -15,10 +15,12 @@ from .nf4 import patch_bnb_nf4
 from .recompute import patch_qwen2_layer_recompute
 from .rmsnorm import patch_qwen2_rmsnorm
 from .rope import patch_rope
+from .startup import cache_package_distributions
 from .swiglu import patch_qwen2_mlp
 from .unpad import patch_unpad
 
 FEATURES = {
+    "startup_cache": True,   # packages_distributions() computed once per run, not twice (CPU, ~2 s)
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
     "mlp_fp16": True,        # MLP keeps fp16 activations (uses the example's SwiGLU kernel)
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
@@ -35,6 +37,8 @@ FEATURES = {
 
 def apply():
     jobs = []
+    if FEATURES["startup_cache"]:
+        cache_package_distributions()  # first: trl is imported further down
     if FEATURES["example_swiglu"]:
         patch_qwen2_mlp()
     if FEATURES["mlp_fp16"]:
