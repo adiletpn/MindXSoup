@@ -1,14 +1,14 @@
 """bitsandbytes Linear4bit on fp16 inputs without the dispatch layers around the same two ops.
 
-On a T4, for every token count this run sees, bitsandbytes computes a 4-bit linear layer as
-"unpack the NF4 weight to fp16, then F.linear" (its own fused 4-bit kernels never win the
-heuristic there; a profile of our run shows none of them), and backward as "unpack again, then
-grad @ W". Between the module and those ops sit Linear4bit.forward, matmul_4bit, the MatMul4Bit
+On a T4, past a few hundred tokens, bitsandbytes computes a 4-bit linear layer as "unpack the NF4
+weight to fp16, then F.linear" (its fused 4-bit kernel only wins its heuristic for few tokens), and
+backward always as "unpack again, then grad @ W". Between the module and those ops sit Linear4bit.forward, matmul_4bit, the MatMul4Bit
 autograd function and the torch.library custom op `bitsandbytes::gemm_4bit` with its
 torch._dynamo-disable wrappers: a few hundred calls per training step whose Python cost leaves the
 GPU waiting. This patch runs the same unpack (our `nf4_unpack_kernel`) and the same F.linear /
 matmul directly, so the results are bit-identical; anything else (other dtypes or quantization
-settings, CPU, the first call that sets the compute dtype) takes the original forward.
+settings, CPU, the first call that sets the compute dtype, token counts where bitsandbytes picks
+its fused kernel) takes the original forward.
 """
 
 import contextlib
@@ -54,6 +54,18 @@ class NF4LinearFunction(torch.autograd.Function):
         return grad_x, None, None, None
 
 
+def _bnb_picks_fused_kernel(x, state):
+    """bitsandbytes' own choice (backends/cuda/ops.py, gemm_4bit): its fused 4-bit kernel for few
+    tokens, dequantize + F.linear past that. We only take over the second case."""
+    from bitsandbytes.backends.cuda import ops
+
+    k = x.shape[-1]
+    m = x.numel() // k
+    if m > ops._gemm_4bit_custom_max_m or k % state.blocksize != 0:
+        return False
+    return bool(ops._gemm_4bit_use_custom_fn(x.device.index, x.dtype, m, state.shape[0], k))
+
+
 def _direct_ok(layer, x):
     if not _enabled:
         return False
@@ -70,7 +82,8 @@ def _direct_ok(layer, x):
             and not weight.requires_grad
             and (layer.bias is None or not layer.bias.requires_grad)
             and _supported(weight.data, state.shape, state.blocksize, state.quant_type,
-                           x.dtype, state.state2.blocksize))
+                           x.dtype, state.state2.blocksize)
+            and not _bnb_picks_fused_kernel(x, state))
 
 
 def patch_bnb_linear4bit():

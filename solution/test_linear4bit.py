@@ -36,7 +36,7 @@ def run(layer, x):
 
 @pytest.mark.parametrize("out_features,bias", [(1536, True), (256, True), (8960, False),
                                                (1536, False)])
-@pytest.mark.parametrize("tokens", [37, 1203])
+@pytest.mark.parametrize("tokens", [37, 300, 700, 1203, 2048])
 def test_direct_path_is_bit_identical(out_features, bias, tokens):
     from solution.linear4bit import patch_bnb_linear4bit
     from solution.nf4 import patch_bnb_nf4
