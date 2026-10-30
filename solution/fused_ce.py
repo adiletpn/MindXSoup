@@ -194,6 +194,7 @@ def patch_qwen2_causal_lm():
         warmup.wait()  # kernels compiled in the background while the model loaded
         if self.training and isinstance(self, torch.nn.Module):
             stream.setup(self)  # decoder weights to the host, once (stream.py)
+            unpad.tag_lora_dropouts(self)
         keep_all = logits_to_keep is None or (isinstance(logits_to_keep, int)
                                               and logits_to_keep == 0)
         if labels is None or not self.training or not keep_all or "shift_labels" in kwargs \

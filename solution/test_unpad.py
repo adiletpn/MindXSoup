@@ -183,3 +183,29 @@ def test_per_row_sdpa_runs_the_fused_fp16_kernel_with_gqa():
     ref, _ = sdpa_attention_forward(module, q, k, v, mask, dropout=0.0, scaling=128 ** -0.5)
     ref = ref.reshape(-1, 12, 128)[index][None]  # [1, N, heads, head_dim]
     torch.testing.assert_close(out.float(), ref.float(), rtol=2e-3, atol=2e-3)
+
+
+def test_packed_dropout_kernel_matches_torch_dropout():
+    from solution import dropout, unpad
+
+    batch_size, length, hidden, p = len(LENGTHS), max(LENGTHS), 1536, 0.05
+    _, mask, _ = batch()
+    _, index = unpad.layout(mask)
+    torch.manual_seed(5)
+    x = torch.randn(batch_size, length, hidden, device="cuda", requires_grad=True)
+    grad_rows = torch.randn(1, index.numel(), hidden, device="cuda")
+    torch.manual_seed(7)
+    ref = unpad.pack(torch.nn.functional.dropout(x, p, True), index)  # the base, then our rows
+    ref.backward(grad_rows)
+    ref_grad = unpad.pack(x.grad, index)
+
+    for out_dtype in (torch.float32, torch.float16):
+        rows = unpad.pack(x.detach(), index).requires_grad_(True)
+        torch.manual_seed(7)
+        got = dropout.packed_dropout(rows, p, batch_size, length, index, out_dtype)
+        assert got.dtype == out_dtype
+        assert torch.equal(got, ref.detach().to(out_dtype))  # fp16: the cast autocast does
+        got.backward(grad_rows.to(out_dtype))
+        expected = ref_grad if out_dtype == torch.float32 else \
+            torch.where(ref.detach() != 0, grad_rows.half().float() * (1.0 / (1.0 - p)), 0.0)
+        assert rows.grad.dtype == torch.float32 and torch.equal(rows.grad, expected)
