@@ -60,3 +60,13 @@ def test_optional_import_checks_are_restored():
     import trl.trainer.base_trainer as base_trainer
 
     assert base_trainer.is_wandb_available() in (True, False)
+
+
+def test_dynamo_flag_is_restored():
+    import os
+
+    from solution.startup import import_bitsandbytes_without_compile_wrappers
+
+    before = os.environ.get("TORCHDYNAMO_DISABLE")
+    import_bitsandbytes_without_compile_wrappers()
+    assert os.environ.get("TORCHDYNAMO_DISABLE") == before
