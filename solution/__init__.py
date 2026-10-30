@@ -12,9 +12,11 @@ from .embedding import patch_fp16_embedding
 from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
 from .mlp import patch_qwen2_mlp_fp16
 from .nf4 import patch_bnb_nf4
+from .recompute import patch_qwen2_layer_recompute
 from .rmsnorm import patch_qwen2_rmsnorm
 from .rope import patch_rope
 from .swiglu import patch_qwen2_mlp
+from .unpad import patch_unpad
 
 FEATURES = {
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
@@ -25,6 +27,8 @@ FEATURES = {
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
     "attention_fp16": True,  # ours (teammate): fp16 q/k/v, one kernel for LoRA sum + RoPE + cast
+    "unpad": True,           # pad tokens never enter the decoder; attention per row
+    "recompute": True,       # long batches rerun some layers in backward to cap the activations
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
 
@@ -53,6 +57,10 @@ def apply():
     if FEATURES["attention_fp16"]:
         patch_qwen2_attention_fp16()
         jobs.append(compile_qkv_rope)
+    if FEATURES["unpad"]:
+        patch_unpad()  # used by the fused head's forward
+    if FEATURES["recompute"]:
+        patch_qwen2_layer_recompute()
     if FEATURES["fp16_embedding"]:
         patch_fp16_embedding()  # after fused_ce: wraps whichever forward is in place
     # wait() runs in the fused head's forward; without it the thread just finishes on its own

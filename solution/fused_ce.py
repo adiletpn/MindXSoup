@@ -25,7 +25,7 @@ import torch
 import triton
 import triton.language as tl
 
-from . import warmup
+from . import unpad, warmup
 
 IGNORE_INDEX = -100
 CHUNK = 512          # rows per head matmul: 512 x 151936 fp16 logits = 155 MB
@@ -147,7 +147,12 @@ def shift_targets(labels):
 
 
 def fused_head_ce(hidden, weight, labels, num_items_in_batch=None):
-    target = shift_targets(labels).to(hidden.device)
+    return fused_head_ce_shifted(hidden, weight, shift_targets(labels).to(hidden.device),
+                                 num_items_in_batch)
+
+
+def fused_head_ce_shifted(hidden, weight, target, num_items_in_batch=None):
+    """fused_head_ce with the targets already shifted (target[t] is the token after t)."""
     labelled = target != IGNORE_INDEX
     if num_items_in_batch is None:
         denominator = labelled.sum()
@@ -195,12 +200,33 @@ def patch_qwen2_causal_lm():
                             position_ids=position_ids, past_key_values=past_key_values,
                             inputs_embeds=inputs_embeds, labels=labels, use_cache=use_cache,
                             logits_to_keep=logits_to_keep, **kwargs)
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask,
-                             position_ids=position_ids, past_key_values=past_key_values,
-                             inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs)
-        hidden = outputs.last_hidden_state
-        loss, entropy, token_loss, correct, labelled = fused_head_ce(
-            hidden, self.lm_head.weight, labels, kwargs.get("num_items_in_batch"))
+        rows = None
+        if unpad.enabled and input_ids is not None and inputs_embeds is None \
+                and past_key_values is None and not getattr(self.model, "has_sliding_layers", True):
+            rows = unpad.layout(attention_mask)
+        if rows is None:
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask,
+                                 position_ids=position_ids, past_key_values=past_key_values,
+                                 inputs_embeds=inputs_embeds, use_cache=use_cache, **kwargs)
+            loss, entropy, token_loss, correct, labelled = fused_head_ce(
+                outputs.last_hidden_state, self.lm_head.weight, labels,
+                kwargs.get("num_items_in_batch"))
+        else:  # the real tokens only, see unpad.py
+            lengths, index = rows
+            batch, length = input_ids.shape
+            if position_ids is None:
+                position_ids = torch.arange(length, device=input_ids.device).expand(batch, length)
+            with unpad.packed(lengths, batch, length, index):
+                outputs = self.model(input_ids=unpad.pack(input_ids, index),
+                                     attention_mask={"full_attention": None},
+                                     position_ids=unpad.pack(position_ids, index),
+                                     use_cache=False, **kwargs)
+            target = unpad.pack(shift_targets(labels).to(input_ids.device), index)
+            loss, entropy, token_loss, correct, labelled = fused_head_ce_shifted(
+                outputs.last_hidden_state, self.lm_head.weight, target,
+                kwargs.get("num_items_in_batch"))
+            entropy = unpad.scatter(entropy, index, batch, length)
+            token_loss = unpad.scatter(token_loss, index, batch, length)
         setattr(self, STEP_ATTR, (entropy, token_loss, correct, labelled))
         return CausalLMOutputWithPast(loss=loss, logits=None,
                                       past_key_values=outputs.past_key_values,
