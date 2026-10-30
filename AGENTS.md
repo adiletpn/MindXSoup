@@ -73,13 +73,12 @@ LoRA r=16 на q_proj и v_proj, batch 4, до 512 токенов, 64 шага) 
 | `solution/fused_ce.py` | fused lm_head + cross-entropy + entropy + accuracy + loss по токенам | Капитан |
 | `solution/mlp.py` | экономия памяти MLP (fp16-хранение / пересчёт) | Капитан |
 | `solution/rmsnorm.py` | fused RMSNorm forward/backward (fp32) | Капитан |
-| `solution/rope.py` | fused rotary embedding forward/backward | Участник 2 |
-| `solution/test_rope.py`, `tools/bench_*.py` | тест RoPE и микробенчмарки кернелов | Участник 2 |
-| `tools/memory_audit.py` | аудит: какие тензоры хранятся для backward и сколько весят | Участник 3 |
-| `solution/test_*.py` | тесты каждого кернела против PyTorch (fwd + bwd) | автор кернела + Участник 3 |
-| `notebooks/dev_kernels.ipynb` | Kaggle-ноутбук для быстрых тестов/бенчмарков кернелов | Участник 1 |
-| `docs/results.md` | журнал всех прогонов (время, память, loss, проверки) | Участник 1 |
-| `README.md`, `SUBMISSION.md`, презентация, видео | сдача | Участник 3 |
+| `solution/nf4.py`, `solution/mlp.py` | распаковка NF4; MLP на fp16-активациях | Капитан |
+| `solution/rope.py`, `solution/test_rope.py`, `tools/bench_rope.py` | кернел RoPE, тест, бенчмарк | Человек B (`docs/tasks/personB_rope_kernel.md`) |
+| `tools/memory_audit.py`, `tools/profile_summary.py`, `docs/memory_audit.md`, `docs/profile_base.md`, `docs/results.md`, `docs/startup_time.md` | замеры, профиль, аудит памяти | Человек A (`docs/tasks/personA_kaggle_audit.md`) |
+| `solution/test_*.py` | тесты каждого кернела против PyTorch (fwd + bwd) | автор кернела |
+| `tools/kaggle_run.py` | запуск репо на Kaggle T4 из терминала | Капитан |
+| `README.md`, `SUBMISSION.md`, презентация, видео | сдача | Капитан + команда |
 
 Интерфейс каждого модуля кернела одинаковый:
 

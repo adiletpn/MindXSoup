@@ -12,3 +12,4 @@ kaggle.json
 *.mov
 *.mp4
 *.wav
+.DS_Store
