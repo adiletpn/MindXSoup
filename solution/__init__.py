@@ -10,6 +10,7 @@ from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
 from .mlp import patch_qwen2_mlp_fp16
 from .nf4 import patch_bnb_nf4
 from .rmsnorm import patch_qwen2_rmsnorm
+from .rope import patch_rope
 from .swiglu import patch_qwen2_mlp
 
 FEATURES = {
@@ -18,6 +19,7 @@ FEATURES = {
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
+    "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
 }
 
 
@@ -33,3 +35,5 @@ def apply():
         patch_trl_metrics()
     if FEATURES["nf4"]:
         patch_bnb_nf4()
+    if FEATURES["rope"]:
+        patch_rope()
