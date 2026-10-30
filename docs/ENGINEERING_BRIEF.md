@@ -245,3 +245,55 @@ Team of 4; captain + Claude own the core. Teammates must commit their own parts 
 contribution): Kaggle runner/profiling, RMSNorm/RoPE kernels + tests, README/presentation/video.
 Prompts live in `docs/tasks/`. Deliverables: repo, public Kaggle notebook, ≤3 min video,
 presentation. Internal deadline 22:00 on Oct 31; freeze code by 20:00.
+
+---
+
+## 11. Q&A intelligence (both recordings + chat on screen) — implications for us
+
+Sources: transcripts of the 12:37 and 13:11 recordings (Whisper, ru) and the YouTube chat visible
+in frames. Notes for humans: docs/QA_NOTES.md.
+
+**Rulings that unlock work**
+- Fused/chunked loss without full logits: allowed ("main memory reserve"). Values must be computed
+  by OUR code; Soup internals may carry them (`ChunkedStep`, `_soup_chunked_step`). Calling Soup's
+  own `stream_loss_chunk` head (`ChunkedHeadLoss`) or `fast_lora` from apply() would be "turning on
+  a built-in mode through internal code" → **forbidden**. We only use the dataclass as a container.
+- Compact activation storage (fp16, int8) restored in backward: allowed.
+- fp16 copies of frozen weights incl. the tied embedding / lm_head: allowed (~445 MB).
+- Unpadding in our own forward (MLP, norms, everything): allowed; num_tokens = attention_mask sum.
+- Background compile thread inside apply(), same process, overlapping model load: allowed.
+  Not allowed: separate processes, caches persisted across runs, behaviour that differs under
+  measurement.
+- Defaults of unset config fields are part of the task; trainer args are compared (check 5).
+
+**Measurement clarifications**
+- Share ≥ 5%: Σ CUDA-event time of all our kernel launches, steps 3..64, divided by the wall time of
+  those steps (synchronized) — not total GPU time. Several kernels add up. **Worst solution run**.
+- Speed and memory: mean of the 2 runs per side (B,S,S,B).
+- Jury image: Python 3.13, torch 2.11, CUDA 12.8, Triton 3.6.0; other packages pinned in notebook.
+
+**Organizer expectations (the bar)**: strong teams s ≈ 1.2–1.5, m ≈ 1.5–2; Unsloth ≈ 2.6–2.9 GB.
+Beating m = 2 is plausible for us (fp32→fp16 activations + fused CE + fp16 embedding).
+
+**Competitor intel from chat (they read the same code as us — our edge is execution speed)**
+- Others asked about fp16 MLP/residual activations, fp16 embedding/lm_head copies,
+  `_soup_chunked_step`, compile threads, torch.utils.checkpoint recompute → expect several teams
+  with fused CE + fp16 activations. Separation must come from: unpadding, residual stream in fp16
+  where lossless, full attention-block storage in fp16, startup/compile overlap, zero wasted copies.
+- **Claim in chat: on T4 with Triton 3.6 `tl.dot` does not use tensor cores (~1.2 TFLOPS vs cuBLAS
+  ~42 TFLOPS)**. Treat as true until measured: never put matmuls in Triton; all GEMMs stay in
+  cuBLAS / bitsandbytes. Our kernels are memory-bound elementwise/reduction kernels. NF4 fused
+  matmul in Triton is dead.
+- Unanswered in chat: torch.utils.checkpoint inside our patch — avoid it; do recompute by hand in our
+  own autograd Functions (explicitly "our code").
+- Unanswered in chat: **private repo + no admin rights → how does the jury clone it?** Our repo is
+  private and we have push/triage only. Must be resolved before the deadline (ask organizers /
+  platform; the template notebook clones REPO_URL, a public Kaggle notebook cannot carry our
+  GITHUB_TOKEN secret). Action item for the captain.
+
+**Updated priority list**
+1. First green run on Kaggle (all 10 checks) with RMSNorm + fused CE + fp16 MLP.
+2. Share ≥ 8%: add RoPE (teammate), fused residual-add+RMSNorm, LoRA/cast fusions — all
+   memory-bound Triton kernels.
+3. Memory: fp16 attention-block storage, fp16 embedding, check where the peak sits (memory audit).
+4. Speed: unpadding; background JIT compile in apply(); trim casts.
