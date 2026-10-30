@@ -149,3 +149,37 @@ def test_layers_to_rerun():
     for n in range(1, 2049):
         k = layers_to_rerun(n, 28, 1024)
         assert (28 - k) * n <= 28 * 1024
+
+
+def test_per_row_sdpa_runs_the_fused_fp16_kernel_with_gqa():
+    """Packed rows with 12 q heads and 2 k/v heads in fp16: the per-row path must not need
+    enable_gqa (no fused kernel on a T4, fp32 math fallback); it matches the padded, masked
+    attention of the base."""
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    from transformers.integrations.sdpa_attention import sdpa_attention_forward
+
+    from solution import unpad
+
+    unpad.patch_sdpa_per_row()
+    lengths, length = [50, 33, 7, 64], 64
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(len(lengths), heads, length, 128, device="cuda", dtype=torch.float16)
+               for heads in (12, 2, 2))
+    module = torch.nn.Module()
+    module.num_key_value_groups, module.is_causal, module.training = 6, True, True
+    keep = torch.arange(length, device="cuda")[None, :] < torch.tensor(lengths, device="cuda")[:, None]
+    index = keep.reshape(-1).nonzero().squeeze(1)
+
+    def packed(x):  # [B, H, T, D] -> [1, H, N, D]
+        return x.transpose(1, 2).reshape(-1, x.shape[1], 128)[index].transpose(0, 1)[None]
+
+    with unpad.packed(lengths, len(lengths), length, index), \
+            sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):  # errors if it needed the math path
+        out, _ = ALL_ATTENTION_FUNCTIONS["sdpa"](module, packed(q), packed(k), packed(v), None,
+                                                 dropout=0.0, scaling=128 ** -0.5)
+    causal = torch.ones(length, length, dtype=torch.bool, device="cuda").tril()
+    mask = (causal[None] & keep[:, None, :])[:, None]
+    ref, _ = sdpa_attention_forward(module, q, k, v, mask, dropout=0.0, scaling=128 ** -0.5)
+    ref = ref.reshape(-1, 12, 128)[index][None]  # [1, N, heads, head_dim]
+    torch.testing.assert_close(out.float(), ref.float(), rtol=2e-3, atol=2e-3)
