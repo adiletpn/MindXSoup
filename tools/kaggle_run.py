@@ -4,6 +4,9 @@
     python tools/kaggle_run.py quick            # solution only, with the profiler table
     python tools/kaggle_run.py full             # base + solution, check_rules, score
     python tools/kaggle_run.py full --repeats 2 --seed 7
+    python tools/kaggle_run.py cmd --cmd "python tools/memory_audit.py"   # any command
+
+Files a command writes to /kaggle/working/out are downloaded too (kaggle_out/<mode>/out/).
 
 The working tree (tracked files, as committed in HEAD plus uncommitted edits) is packed into the
 kernel script itself, so the kernel needs no GitHub access. Needs the Kaggle CLI and
@@ -47,6 +50,9 @@ print(subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used", "--format=cs
 sh('python -m pip install -q {pins}', "pip.log")
 if MODE == "tests":
     sh("python -m pytest solution -q -p no:cacheprovider", "pytest_solution.log")
+elif MODE == "cmd":
+    sh("python task/prepare_data.py", "prepare_data.log")
+    sh(EXTRA, "cmd.log")
 else:
     sh("python task/prepare_data.py", "prepare_data.log")
     if MODE == "quick":
@@ -99,7 +105,8 @@ def kaggle(*args, check=True):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("mode", choices=("tests", "quick", "full"))
+    parser.add_argument("mode", choices=("tests", "quick", "full", "cmd"))
+    parser.add_argument("--cmd", help="command to run in the repo for mode cmd")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--slug", default="mindx-dev")
@@ -108,7 +115,11 @@ def main():
 
     user = json.loads((Path.home() / ".kaggle" / "kaggle.json").read_text())["username"]
     extra = f"--repeats {args.repeats}" if args.mode == "full" else ""
-    if args.seed is not None:
+    if args.mode == "cmd":
+        if not args.cmd:
+            sys.exit("mode cmd needs --cmd")
+        extra = args.cmd
+    if args.seed is not None and args.mode != "cmd":
         extra += f" --seed {args.seed}"
     work = REPO / "kaggle_out" / "push"
     work.mkdir(parents=True, exist_ok=True)

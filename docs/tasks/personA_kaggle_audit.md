@@ -1,8 +1,73 @@
 # ПРОМПТ ДЛЯ ЧЕЛОВЕКА A — Kaggle, замеры и аудит памяти
 
-> Как пользоваться: скопируй ВСЁ ниже линии в свою нейросеть (ChatGPT / Claude / Gemini) одним
+> Как пользоваться: лучше всего — **Claude Code**: открой терминал, запусти `claude` и вставь ВЕСЬ этот
+> файл одним сообщением; он сам всё настроит (git, ветку, Kaggle) и будет вести тебя. Можно и в обычную
+> нейросеть (ChatGPT / Claude / Gemini) — тогда команды выполняешь сам. Скопируй ВСЁ ниже линии одним
 > сообщением. Потом делай по шагам, что она скажет, и присылай ей результаты (вывод ячеек, ошибки).
 > В конце пришли капитану (Адилету) то, что указано в разделе «Что сдать капитану».
+
+---
+
+## ⚙️ ЕСЛИ ТЫ — CLAUDE CODE (агент в терминале): СНАЧАЛА НАСТРОЙКА
+
+Пользователь — новичок в git и Kaggle. **Делай всё сам**, командами в терминале, и коротко объясняй,
+что сделал. Спрашивай пользователя только то, что знает только он (имя, email, логины, пароли, SMS).
+
+**1. Инструменты.** Проверь `git --version` и `gh --version`. Если чего-то нет — установи
+(macOS: `brew install git gh`; Windows: `winget install Git.Git GitHub.cli`). Проверь
+`gh auth status`; если не залогинен — запусти `gh auth login` (GitHub.com → HTTPS → login with a web
+browser) и подскажи пользователю, что нажать в браузере.
+
+**2. Доступ к репозиторию команды.** `gh repo view BAITC-Hacks/hack-3e361ee8-mindx`.
+- Если доступа нет — проверь приглашения: `gh api user/repository_invitations` и прими нужное:
+  `gh api -X PATCH user/repository_invitations/<id>`.
+- Если приглашения нет — скажи пользователю: «Напиши капитану (Адилету): мне нужен доступ к репо
+  команды через платформу edu.astanahub.com, мой GitHub-логин — …». А пока работай в локальной папке
+  `~/mindx-work` (код возьми из публичного стартового репо
+  `https://github.com/MakazhanAlpamys/soup-kernel-challenge`) и в конце отдай файлы капитану.
+
+**3. Клонирование и контекст.**
+```bash
+gh repo clone BAITC-Hacks/hack-3e361ee8-mindx ~/mindx
+cd ~/mindx
+```
+Прочитай **целиком** `AGENTS.md`, `docs/ENGINEERING_BRIEF.md`, `docs/QA_NOTES.md` — там вся задача,
+правила жюри, что уже сделано и что запрещено. Это важнее, чем этот промпт, если они расходятся.
+
+**4. Подпись коммитов.** Спроси у пользователя имя и email **его GitHub-аккаунта** и выполни в папке
+репо: `git config user.name "Имя"` и `git config user.email "email@…"`. Email обязан быть привязан к
+GitHub пользователя (github.com/settings/emails), иначе жюри не увидит его вклад — проверь это.
+
+**5. Своя ветка.** `git checkout -b audit` (если ветка уже есть на GitHub — `git checkout audit`).
+
+**6. Работа.** Трогай **только свои файлы**: `tools/memory_audit.py`, `tools/profile_summary.py`, `docs/memory_audit.md`, `docs/profile_base.md`, `docs/results.md`, `docs/startup_time.md`. **Никогда** не меняй `harness/`, `tests/`,
+`task/`, не трогай чужие файлы в `solution/` и `solution/__init__.py` (подключает капитан).
+Коммить маленькими шагами с понятными сообщениями на английском:
+```bash
+git add <свои файлы>
+git commit -m "Add …"
+git push -u origin audit
+```
+**Никогда:** push в `main`, `git push --force`, коммит токенов, `kaggle.json`, папок `runs*`,
+`data/`, `kaggle_out/`.
+
+**7. Kaggle из терминала (вместо кликов в браузере).**
+- Пользователь: kaggle.com → регистрация → Settings → **Phone verification** → раздел API →
+  **Create Legacy API Key** → скачается `kaggle.json`.
+- Ты: положи его в `~/.kaggle/kaggle.json` (`chmod 600`), установи CLI в отдельное окружение:
+  `python3 -m venv ~/.venvs/kaggle && ~/.venvs/kaggle/bin/pip install -q kaggle`.
+- Запуск на Kaggle T4 одной командой из папки репо (код текущей папки упаковывается в задачу сам):
+  - тесты всех кернелов: `~/.venvs/kaggle/bin/python tools/kaggle_run.py tests --slug <ник>-tests`
+  - любая команда: `~/.venvs/kaggle/bin/python tools/kaggle_run.py cmd --cmd "python tools/имя.py" --slug <ник>-cmd`
+  - результаты скачиваются в `kaggle_out/<режим>/` (логи — в `out/*.log`).
+  - `--slug` — латиница и дефисы, уникальный для каждого вида запуска.
+- Для этой роли: задачи 1–4 ниже оформи как скрипты в `tools/` и запускай режимом `cmd`; для базового прогона: `--cmd "python harness/run_task.py --only base --out runs_base"`. Файлы, которые скрипт пишет в `/kaggle/working/out`, скачиваются автоматически.
+
+**8. Сдача.** Когда задача готова и проверена:
+```bash
+gh pr create --base main --head audit --title "…" --body "что сделано, результаты, как проверить"
+```
+Дай пользователю ссылку на PR и короткий отчёт (что сделано, цифры), чтобы он переслал капитану.
 
 ---
 
