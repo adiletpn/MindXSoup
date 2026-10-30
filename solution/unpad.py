@@ -72,11 +72,27 @@ def patch_sdpa_per_row():
         if rows is None or attention_mask is not None or query.shape[0] != 1 \
                 or query.shape[2] != sum(rows[0]):
             return original(module, query, key, value, attention_mask, **kwargs)
+        direct = (kwargs.get("sliding_window") is None and kwargs.get("position_bias") is None
+                  and not kwargs.get("output_attentions", False)
+                  and query.shape[1] % key.shape[1] == 0 and key.shape == value.shape)
+        if direct and query.shape[1] != key.shape[1]:
+            # Without a mask transformers asks SDPA for enable_gqa, which has no fused kernel on
+            # a T4: SDPA falls back to the math path in fp32 (sgemm + fp32 softmax), about 2.5x
+            # slower than the fp16 memory-efficient kernel the padded base runs on repeated k/v.
+            # Repeat k/v to the query heads once, as transformers' repeat_kv does with a mask.
+            groups = query.shape[1] // key.shape[1]
+            key, value = (x[:, :, None].expand(-1, -1, groups, -1, -1).reshape(
+                x.shape[0], -1, x.shape[2], x.shape[3]) for x in (key, value))
         outputs, start = [], 0
         for n in rows[0]:
             stop = start + n
-            out, _ = original(module, query[:, :, start:stop], key[:, :, start:stop],
-                              value[:, :, start:stop], None, **kwargs)
+            q, k, v = query[:, :, start:stop], key[:, :, start:stop], value[:, :, start:stop]
+            if direct:  # what sdpa_attention_forward runs for a mask-free causal row
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, dropout_p=kwargs.get("dropout", 0.0), scale=kwargs.get("scaling"),
+                    is_causal=n > 1).transpose(1, 2).contiguous()
+            else:
+                out, _ = original(module, q, k, v, None, **kwargs)
             outputs.append(out)  # [1, n, heads, head_dim]
             start = stop
         return torch.cat(outputs, dim=1), None
