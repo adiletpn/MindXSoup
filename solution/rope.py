@@ -99,9 +99,10 @@ class RoPEFunction(torch.autograd.Function):
     """(q * cos + rotate_half(q) * sin, same for k), one launch each way; saves only cos, sin."""
 
     @staticmethod
-    def forward(ctx, q, k, cos, sin):
+    def forward(ctx, q, k, cos, sin, out_dtype=None):
         q_out, k_out = _rope_launch(False, q, k, cos, sin,
-                                    torch.result_type(q, cos), torch.result_type(k, cos))
+                                    out_dtype or torch.result_type(q, cos),
+                                    out_dtype or torch.result_type(k, cos))
         ctx.save_for_backward(cos, sin)
         ctx.dtypes = (q.dtype, k.dtype)
         return q_out, k_out
@@ -111,12 +112,14 @@ class RoPEFunction(torch.autograd.Function):
         cos, sin = ctx.saved_tensors
         dq_in, dk_in = _rope_launch(True, dq, dk, cos, sin, *ctx.dtypes)
         return (dq_in if ctx.needs_input_grad[0] else None,
-                dk_in if ctx.needs_input_grad[1] else None, None, None)
+                dk_in if ctx.needs_input_grad[1] else None, None, None, None)
 
 
-def apply_rope(q, k, cos, sin, unsqueeze_dim=1):
-    """Same contract as transformers' apply_rotary_pos_emb for [B, heads, T, D] q/k."""
-    return RoPEFunction.apply(q, k, cos, sin)
+def apply_rope(q, k, cos, sin, unsqueeze_dim=1, out_dtype=None):
+    """Same contract as transformers' apply_rotary_pos_emb for [B, heads, T, D] q/k.
+    out_dtype (e.g. torch.float16) writes the rotated q/k in that dtype straight away (the math
+    stays fp32); by default the dtype is PyTorch's promotion of q/k and cos, as in the original."""
+    return RoPEFunction.apply(q, k, cos, sin, out_dtype)
 
 
 _SUPPORTED = (torch.float16, torch.float32)

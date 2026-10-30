@@ -130,3 +130,20 @@ def test_patch_routes_cuda_and_falls_back(monkeypatch):
     ref_q, ref_k = reference(*cpu)
     torch.testing.assert_close(cpu_q, ref_q)
     torch.testing.assert_close(cpu_k, ref_k)
+
+
+def test_out_dtype_writes_fp16_directly():
+    """fp32 q/k with out_dtype=fp16: the fp32 rotation rounded once; grads come back in fp32."""
+    from solution.rope import apply_rope
+
+    torch.manual_seed(0)
+    q, k = model_like_qk(2, 12, 2, 64, torch.float32)
+    cos, sin = model_like_cos_sin(2, 64, torch.float32)
+    ref_q, ref_k = (x.half() for x in reference(q, k, cos, sin))
+    grads = (torch.randn_like(ref_q), torch.randn_like(ref_k))
+    ref_dq, ref_dk = torch.autograd.grad((ref_q, ref_k), (q, k), grads)
+    out_q, out_k = apply_rope(q, k, cos, sin, out_dtype=torch.float16)
+    dq, dk = torch.autograd.grad((out_q, out_k), (q, k), grads)
+    for a, b in ((out_q, ref_q), (out_k, ref_k), (dq, ref_dq), (dk, ref_dk)):
+        assert a.dtype == b.dtype
+        torch.testing.assert_close(a.float(), b.float(), rtol=2e-3, atol=2e-3)
