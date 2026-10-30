@@ -25,6 +25,8 @@ import torch
 import triton
 import triton.language as tl
 
+from . import warmup
+
 IGNORE_INDEX = -100
 CHUNK = 512          # rows per head matmul: 512 x 151936 fp16 logits = 155 MB
 VOCAB_BLOCK = 4096
@@ -82,6 +84,14 @@ def head_ce_rows_kernel(logits_ptr, target_ptr, loss_ptr, entropy_ptr, argmax_pt
             tl.store(row_ptr + idx, g.to(logits_ptr.dtype.element_ty), mask=valid)
 
 
+def launch_rows(logits, target, loss, entropy, argmax, with_grad):
+    """One program per row of `logits` [rows, vocab] fp16; overwrites it with the scaled
+    gradient when `with_grad`."""
+    head_ce_rows_kernel[(logits.shape[0],)](
+        logits, target, loss, entropy, argmax, logits.shape[1], GRAD_SCALE,
+        WRITE_GRAD=with_grad, BLOCK=VOCAB_BLOCK, num_warps=8)
+
+
 class FusedHeadCE(torch.autograd.Function):
     """sum over labelled positions of CE(hidden @ weight.T, target) / denominator, plus the
     per-position entropy, loss and argmax that TRL and Soup log."""
@@ -106,10 +116,8 @@ class FusedHeadCE(torch.autograd.Function):
                 stop = min(start + CHUNK, rows)
                 buf = logits[: stop - start]
                 torch.mm(flat[start:stop].to(torch.float16), weight16.t(), out=buf)
-                head_ce_rows_kernel[(stop - start,)](
-                    buf, flat_target[start:stop], token_loss[start:stop],
-                    token_entropy[start:stop], argmax[start:stop], vocab, GRAD_SCALE,
-                    WRITE_GRAD=with_grad, BLOCK=VOCAB_BLOCK, num_warps=8)
+                launch_rows(buf, flat_target[start:stop], token_loss[start:stop],
+                            token_entropy[start:stop], argmax[start:stop], with_grad)
                 if with_grad:
                     grad[start:stop] = torch.mm(buf, weight16).float()
         del logits, weight16
@@ -178,6 +186,7 @@ def patch_qwen2_causal_lm():
     def forward(self, input_ids=None, attention_mask=None, position_ids=None,
                 past_key_values=None, inputs_embeds=None, labels=None, use_cache=None,
                 logits_to_keep=0, **kwargs):
+        warmup.wait()  # kernels compiled in the background while the model loaded
         keep_all = logits_to_keep is None or (isinstance(logits_to_keep, int)
                                               and logits_to_keep == 0)
         if labels is None or not self.training or not keep_all or "shift_labels" in kwargs \
