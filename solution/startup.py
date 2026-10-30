@@ -55,3 +55,36 @@ def skip_in_memory_map_hashing():
         wrapped._mindx_patched = True
         wrapped.__name__, wrapped.__doc__ = method.__name__, method.__doc__
         setattr(Dataset, name, wrapped)
+
+
+def skip_unused_optional_imports():
+    """Two optional packages the run imports but never uses (organizers: allowed, 30.10 21:09):
+
+    * sklearn (~1.7 s): transformers.generation.candidate_generator imports sklearn.metrics when
+      sklearn is installed, for assisted generation with a confidence threshold;
+    * wandb (~1.4 s): trl's base trainer imports it when installed, to put the URL of an active
+      wandb run on the model card; Soup runs without --wandb, so there is no run and the URL is
+      None either way.
+
+    While exactly those two modules are imported, the availability check they consult answers
+    False; it is restored right after, so everything imported later sees the real answer. The
+    packages stay installed and importable; nothing is stubbed in sys.modules.
+    """
+    import sys
+
+    import transformers
+    import transformers.utils as transformers_utils
+
+    if "transformers.generation.candidate_generator" not in sys.modules:
+        real = transformers_utils.is_sklearn_available
+        transformers_utils.is_sklearn_available = lambda: False
+        try:
+            import transformers.generation.candidate_generator  # noqa: F401
+        finally:
+            transformers_utils.is_sklearn_available = real
+    if "trl.trainer.base_trainer" not in sys.modules:
+        transformers.__dict__["is_wandb_available"] = lambda: False  # what trl imports by name
+        try:
+            import trl.trainer.base_trainer  # noqa: F401
+        finally:
+            transformers.__dict__.pop("is_wandb_available", None)  # lazy attribute again

@@ -44,3 +44,19 @@ def test_in_memory_map_gives_the_same_rows_and_leaves_random_alone():
     assert random.getstate() == states[0]
     assert (np.random.get_state()[1] == states[1]).all()
     assert torch.equal(torch.get_rng_state(), states[2])
+
+
+def test_optional_import_checks_are_restored():
+    import transformers
+    import transformers.utils as transformers_utils
+
+    from solution.startup import skip_unused_optional_imports
+
+    real = transformers_utils.is_sklearn_available
+    skip_unused_optional_imports()
+    assert transformers_utils.is_sklearn_available is real
+    assert "is_wandb_available" not in transformers.__dict__ or \
+        transformers.is_wandb_available.__module__.startswith("transformers")
+    import trl.trainer.base_trainer as base_trainer
+
+    assert base_trainer.is_wandb_available() in (True, False)
