@@ -7,6 +7,7 @@ it does not handle (CPU tensors, fake modules in Soup's tests, unexpected dtypes
 """
 
 from . import warmup
+from .embedding import patch_fp16_embedding
 from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
 from .mlp import patch_qwen2_mlp_fp16
 from .nf4 import patch_bnb_nf4
@@ -21,6 +22,7 @@ FEATURES = {
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
+    "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
 
@@ -46,6 +48,8 @@ def apply():
     if FEATURES["rope"]:
         patch_rope()
         jobs.append(warmup.compile_rope)
+    if FEATURES["fp16_embedding"]:
+        patch_fp16_embedding()  # after fused_ce: wraps whichever forward is in place
     # wait() runs in the fused head's forward; without it the thread just finishes on its own
     if FEATURES["warmup"]:
         warmup.start(jobs)
