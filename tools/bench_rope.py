@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch  # noqa: E402
 
-from solution.rope import apply_rope, rope_bwd_kernel, rope_fwd_kernel  # noqa: E402
+from solution.rope import apply_rope, rope_kernel  # noqa: E402
 from solution.test_rope import model_like_cos_sin, model_like_qk, reference  # noqa: E402
 
 BATCH, N_Q, N_K, N_TOKENS, LAYERS = 4, 12, 2, 512, 28
@@ -73,24 +73,34 @@ def main():
 
     print("triton", triton.__version__)
 
+    # In training other kernels run first and pay the one-time costs (Triton's compiler and
+    # driver start-up, autograd's first backward); pay them here too, so the numbers below are
+    # what RoPE adds on its own.
+    from solution.rmsnorm import rmsnorm
+
+    x = torch.randn(8, 1536, device="cuda", requires_grad=True)
+    warm_s = timed_first_call(lambda: rmsnorm(x, torch.ones(1536, device="cuda"), 1e-6)
+                              .sum().backward())
+    print(f"\none-time start-up (Triton init + RMSNorm compile, autograd): {warm_s:6.3f} s")
+
     print("\n== First call with an empty Triton cache (fp32, T=512) ==")
     q, k, cos, sin, grads = inputs(N_TOKENS, torch.float32)
     holder = {}
     fwd_s = timed_first_call(lambda: holder.setdefault("out", apply_rope(q, k, cos, sin)))
     bwd_s = timed_first_call(lambda: torch.autograd.grad(holder["out"], (q, k), grads))
-    print(f"forward kernel  first call: {fwd_s:6.3f} s")
-    print(f"backward kernel first call: {bwd_s:6.3f} s")
-    print(f"total compile + first run : {fwd_s + bwd_s:6.3f} s")
+    print(f"forward  first call (compiles the kernel): {fwd_s:6.3f} s")
+    print(f"backward first call (same kernel, cached): {bwd_s:6.3f} s"
+          "  (no compile; PyTorch's one-time cost of this first graph backward)")
 
     print("\n== New sequence lengths must not compile again (fp32) ==")
-    before = compiled_variants(rope_fwd_kernel), compiled_variants(rope_bwd_kernel)
+    before = compiled_variants(rope_kernel)
     for n_tokens in (100, 200, 300, 77, 511):
         args = inputs(n_tokens, torch.float32)
         seconds = timed_first_call(lambda: fwd_bwd(apply_rope, *args))
         print(f"T={n_tokens:4d}: first fwd+bwd call {1000 * seconds:7.2f} ms")
-    after = compiled_variants(rope_fwd_kernel), compiled_variants(rope_bwd_kernel)
-    print(f"compiled variants fwd/bwd: before {before}, after {after}"
-          + ("  -> no recompilation" if before == after and None not in before else ""))
+    after = compiled_variants(rope_kernel)
+    print(f"compiled variants: before {before}, after {after}"
+          + ("  -> no recompilation" if before == after and before is not None else ""))
 
     print("\n== Speed, B=4 T=512, 12 q heads + 2 k heads, head_dim 128 ==")
     print(f"{'dtype':6} {'pass':8} {'PyTorch, ms':>12} {'ours, ms':>9} {'speedup':>8} "

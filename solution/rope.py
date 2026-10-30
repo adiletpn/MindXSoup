@@ -38,15 +38,20 @@ def _rope_rotate_heads(x_ptr, y_ptr, b, t, sxb, sxh, sxt, syb, syh, syt, c1, c2,
     tl.store(y + HALF, (x2 * c2 + x1 * r).to(y_ptr.dtype.element_ty), mask=mask)
 
 
+# Forward and backward are one kernel, so the run pays for one Triton compile instead of two
+# (about 2.5 s each on Kaggle's CPU, more than the kernel saves over 64 steps). Both directions are
+#     y1 = x1 * cos1 - sign * x2 * sin_a        y2 = x2 * cos2 + sign * x1 * sin_b
+# forward:  sign = +1, sin_a = sin1, sin_b = sin2
+# backward: sign = -1, sin_a = sin2, sin_b = sin1   (dx1 = dy1*cos1 + dy2*sin2, dx2 = dy2*cos2 - dy1*sin1)
 # n_tokens changes from batch to batch; without do_not_specialize Triton would compile a new
 # variant whenever its divisibility by 16 changes. The batch strides change too, but they are
 # always multiples of 16 (T * heads * 128 and T * 128), so they never trigger a recompile, and
 # keeping them specialized lets Triton vectorize the loads.
-@triton.jit(do_not_specialize=["n_tokens"])
-def rope_fwd_kernel(q_ptr, k_ptr, cos_ptr, sin_ptr, qo_ptr, ko_ptr, n_tokens,
-                    sqb, sqh, sqt, skb, skh, skt, sqob, sqoh, sqot, skob, skoh, skot, scb, sct,
-                    N_Q: tl.constexpr, N_K: tl.constexpr, BLOCK_Q: tl.constexpr,
-                    BLOCK_K: tl.constexpr, HALF: tl.constexpr):
+@triton.jit(do_not_specialize=["n_tokens", "sin_a_off", "sin_b_off", "sign"])
+def rope_kernel(q_ptr, k_ptr, cos_ptr, sin_ptr, qo_ptr, ko_ptr, n_tokens, sin_a_off, sin_b_off,
+                sign, sqb, sqh, sqt, skb, skh, skt, sqob, sqoh, sqot, skob, skoh, skot, scb, sct,
+                N_Q: tl.constexpr, N_K: tl.constexpr, BLOCK_Q: tl.constexpr,
+                BLOCK_K: tl.constexpr, HALF: tl.constexpr):
     pid = tl.program_id(0)
     b = pid // n_tokens
     t = pid % n_tokens
@@ -54,32 +59,11 @@ def rope_fwd_kernel(q_ptr, k_ptr, cos_ptr, sin_ptr, qo_ptr, ko_ptr, n_tokens,
     row = b * scb + t * sct + cols
     c1 = tl.load(cos_ptr + row).to(tl.float32)
     c2 = tl.load(cos_ptr + row + HALF).to(tl.float32)
-    s1 = tl.load(sin_ptr + row).to(tl.float32)
-    s2 = tl.load(sin_ptr + row + HALF).to(tl.float32)
-    _rope_rotate_heads(q_ptr, qo_ptr, b, t, sqb, sqh, sqt, sqob, sqoh, sqot, c1, c2, -s1, s2,
+    p = -sign * tl.load(sin_ptr + row + sin_a_off).to(tl.float32)
+    r = sign * tl.load(sin_ptr + row + sin_b_off).to(tl.float32)
+    _rope_rotate_heads(q_ptr, qo_ptr, b, t, sqb, sqh, sqt, sqob, sqoh, sqot, c1, c2, p, r,
                        N_Q, BLOCK_Q, HALF)
-    _rope_rotate_heads(k_ptr, ko_ptr, b, t, skb, skh, skt, skob, skoh, skot, c1, c2, -s1, s2,
-                       N_K, BLOCK_K, HALF)
-
-
-@triton.jit(do_not_specialize=["n_tokens"])
-def rope_bwd_kernel(dq_ptr, dk_ptr, cos_ptr, sin_ptr, dqi_ptr, dki_ptr, n_tokens,
-                    sqb, sqh, sqt, skb, skh, skt, sqib, sqih, sqit, skib, skih, skit, scb, sct,
-                    N_Q: tl.constexpr, N_K: tl.constexpr, BLOCK_Q: tl.constexpr,
-                    BLOCK_K: tl.constexpr, HALF: tl.constexpr):
-    pid = tl.program_id(0)
-    b = pid // n_tokens
-    t = pid % n_tokens
-    cols = tl.arange(0, HALF)[None, :]
-    row = b * scb + t * sct + cols
-    c1 = tl.load(cos_ptr + row).to(tl.float32)
-    c2 = tl.load(cos_ptr + row + HALF).to(tl.float32)
-    s1 = tl.load(sin_ptr + row).to(tl.float32)
-    s2 = tl.load(sin_ptr + row + HALF).to(tl.float32)
-    # transpose of the forward rotation: dx1 = dy1 * c1 + dy2 * s2,  dx2 = dy2 * c2 - dy1 * s1
-    _rope_rotate_heads(dq_ptr, dqi_ptr, b, t, sqb, sqh, sqt, sqib, sqih, sqit, c1, c2, s2, -s1,
-                       N_Q, BLOCK_Q, HALF)
-    _rope_rotate_heads(dk_ptr, dki_ptr, b, t, skb, skh, skt, skib, skih, skit, c1, c2, s2, -s1,
+    _rope_rotate_heads(k_ptr, ko_ptr, b, t, skb, skh, skt, skob, skoh, skot, c1, c2, p, r,
                        N_K, BLOCK_K, HALF)
 
 
@@ -87,8 +71,8 @@ def _last_dim_dense(x):
     return x if x.stride(-1) == 1 else x.contiguous()
 
 
-def _rope_launch(kernel, q, k, cos, sin, q_dtype, k_dtype):
-    """Run one of the kernels on [B, heads, T, D] q and k (any strides) and [B or 1, T, D]
+def _rope_launch(backward, q, k, cos, sin, q_dtype, k_dtype):
+    """Rotate (forward) or rotate back (backward) [B, heads, T, D] q and k (any strides) and [B or 1, T, D]
     cos/sin; the outputs get the layout of q and k."""
     q, k = _last_dim_dense(q), _last_dim_dense(k)
     batch, n_q, n_tokens, dim = q.shape
@@ -99,13 +83,15 @@ def _rope_launch(kernel, q, k, cos, sin, q_dtype, k_dtype):
     sin = sin.expand(batch, n_tokens, dim)
     if cos.stride() != sin.stride() or cos.stride(-1) != 1:
         cos, sin = cos.contiguous(), sin.contiguous()
-    kernel[(batch * n_tokens,)](
-        q, k, cos, sin, q_out, k_out, n_tokens,
+    half = dim // 2
+    sin_a_off, sin_b_off, sign = (half, 0, -1.0) if backward else (0, half, 1.0)
+    rope_kernel[(batch * n_tokens,)](
+        q, k, cos, sin, q_out, k_out, n_tokens, sin_a_off, sin_b_off, sign,
         q.stride(0), q.stride(1), q.stride(2), k.stride(0), k.stride(1), k.stride(2),
         q_out.stride(0), q_out.stride(1), q_out.stride(2),
         k_out.stride(0), k_out.stride(1), k_out.stride(2), cos.stride(0), cos.stride(1),
         N_Q=n_q, N_K=n_k, BLOCK_Q=triton.next_power_of_2(n_q),
-        BLOCK_K=triton.next_power_of_2(n_k), HALF=dim // 2, num_warps=4)
+        BLOCK_K=triton.next_power_of_2(n_k), HALF=half, num_warps=4)
     return q_out, k_out
 
 
@@ -114,7 +100,7 @@ class RoPEFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, cos, sin):
-        q_out, k_out = _rope_launch(rope_fwd_kernel, q, k, cos, sin,
+        q_out, k_out = _rope_launch(False, q, k, cos, sin,
                                     torch.result_type(q, cos), torch.result_type(k, cos))
         ctx.save_for_backward(cos, sin)
         ctx.dtypes = (q.dtype, k.dtype)
@@ -123,7 +109,7 @@ class RoPEFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dq, dk):
         cos, sin = ctx.saved_tensors
-        dq_in, dk_in = _rope_launch(rope_bwd_kernel, dq, dk, cos, sin, *ctx.dtypes)
+        dq_in, dk_in = _rope_launch(True, dq, dk, cos, sin, *ctx.dtypes)
         return (dq_in if ctx.needs_input_grad[0] else None,
                 dk_in if ctx.needs_input_grad[1] else None, None, None)
 
