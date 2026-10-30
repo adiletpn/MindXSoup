@@ -75,7 +75,9 @@ LoRA r=16 на q_proj и v_proj, batch 4, до 512 токенов, 64 шага) 
 | `solution/rmsnorm.py` | fused RMSNorm forward/backward (fp32) | Капитан |
 | `solution/nf4.py`, `solution/mlp.py` | распаковка NF4; MLP на fp16-активациях | Капитан |
 | `solution/rope.py`, `solution/test_rope.py`, `tools/bench_rope.py` | кернел RoPE, тест, бенчмарк | Человек B (`docs/tasks/personB_rope_kernel.md`) |
+| `solution/attention.py`, `solution/test_attention.py` | fp16-путь attention | Человек B (`docs/tasks/personB_round2.md`) |
 | `tools/memory_audit.py`, `tools/profile_summary.py`, `docs/memory_audit.md`, `docs/profile_base.md`, `docs/results.md`, `docs/startup_time.md` | замеры, профиль, аудит памяти | Человек A (`docs/tasks/personA_kaggle_audit.md`) |
+| `tools/startup_probe.py`, `docs/memory_audit_solution.md`, сдаточный Kaggle-ноутбук | аудит решения, время старта | Человек A (`docs/tasks/personA_round2.md`) |
 | `solution/test_*.py` | тесты каждого кернела против PyTorch (fwd + bwd) | автор кернела |
 | `tools/kaggle_run.py` | запуск репо на Kaggle T4 из терминала | Капитан |
 | `README.md`, `SUBMISSION.md`, презентация, видео | сдача | Капитан + команда |
