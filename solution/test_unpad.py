@@ -12,8 +12,24 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a C
 LENGTHS = [37, 20, 5, 30]
 
 
+class LoraLinear(torch.nn.Module):
+    """base(x) + B(A(dropout(x))) * scale, the structure of peft's LoRA layer (peft itself is
+    not used here: on Kaggle's image it trips over an old torchao for plain nn.Linear)."""
+
+    def __init__(self, base, r, dropout):
+        super().__init__()
+        self.base = base
+        self.dropout = torch.nn.Dropout(dropout)
+        self.lora_A = torch.nn.Linear(base.in_features, r, bias=False)
+        self.lora_B = torch.nn.Linear(r, base.out_features, bias=False)
+        torch.nn.init.normal_(self.lora_B.weight, std=0.02)  # non-zero, so the LoRA path matters
+        self.scale = 2.0
+
+    def forward(self, x):
+        return self.base(x) + self.lora_B(self.lora_A(self.dropout(x))) * self.scale
+
+
 def tiny_lora_qwen2(dropout):
-    from peft import LoraConfig, get_peft_model
     from transformers import Qwen2Config, Qwen2ForCausalLM
 
     from solution.fused_ce import patch_qwen2_causal_lm
@@ -25,15 +41,13 @@ def tiny_lora_qwen2(dropout):
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
                          attn_implementation="sdpa")
     torch.manual_seed(0)
-    model = Qwen2ForCausalLM(config).cuda()
+    model = Qwen2ForCausalLM(config)
     for param in model.parameters():
         param.requires_grad_(False)
-    lora = LoraConfig(r=4, lora_alpha=8, lora_dropout=dropout, target_modules=["q_proj", "v_proj"])
-    model = get_peft_model(model, lora)
-    for name, param in model.named_parameters():
-        if "lora_B" in name:  # non-zero B, so the LoRA path matters
-            torch.nn.init.normal_(param, std=0.02)
-    return model.train()
+    for layer in model.model.layers:
+        layer.self_attn.q_proj = LoraLinear(layer.self_attn.q_proj, 4, dropout)
+        layer.self_attn.v_proj = LoraLinear(layer.self_attn.v_proj, 4, dropout)
+    return model.cuda().train()
 
 
 def batch(left_padded=False):
@@ -58,7 +72,7 @@ def step(model, unpadded, ids, mask, labels):
     torch.manual_seed(123)  # the same dropout draws in both runs
     out = model(input_ids=ids, attention_mask=mask, labels=labels)
     out.loss.backward()
-    entropy, token_loss, correct, labelled = getattr(model.get_base_model(), fused_ce.STEP_ATTR)
+    entropy, token_loss, correct, labelled = getattr(model, fused_ce.STEP_ATTR)
     grads = {n: p.grad.clone() for n, p in model.named_parameters() if p.requires_grad}
     model.zero_grad()
     unpad.enabled = True
