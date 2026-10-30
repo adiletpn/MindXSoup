@@ -92,10 +92,23 @@ host weight, double-buffered vocab chunks, input lookup by CPU gather of the bat
 3. **Startup**: done — one metadata scan, no dill hashing, no unused sklearn/wandb, no bnb CPU
    compile wrappers (apply 4.9 → 3.7 s). Left: model loading conversion (§2).
 
-## 6. Bench results (fill in)
+## 6. Bench results (Kaggle T4, `mindx-research`, 31.10 03:40)
 
-_pending: `mindx-research` kernel — PCIe pinned/pageable GB/s, copy/GEMM overlap, fp16 vs int8
-GEMM on our shapes, one layer's forward GEMMs at N = 830 / 2048._
+| what | result |
+|---|---|
+| H2D pinned (24 / 96 / 445 MiB) | **12.3–12.4 GB/s** (2.0 / 8.1 / 37.7 ms) |
+| H2D pageable | 6.7–6.9 GB/s → always pin |
+| copy on a side stream during GEMMs | GEMMs 9.72 ms + copy 8.14 ms → **both 9.41 ms: the copy is fully hidden** |
+| one decoder layer's 7 forward GEMMs | **3.86 ms at N = 830**, 8.80 ms at N = 2048 |
+| one layer's NF4 bytes over PCIe (≈ 24 MiB) | ≈ 2.0 ms → hidden behind its own forward GEMMs (and ≈ 3× more compute in recompute + backward) |
+| head weight over PCIe (445 MiB) | 37.7 ms per pass → one pass per step ≈ +2.4 s if not overlapped; overlap with the last layers' backward |
+| fp16 GEMM, our shapes | 15–38 TFLOPS |
+| int8 `torch._int_mm(x8, w8.t())` (B column-major) | ×2.38 (1536²), ×1.28 (N 256), ×1.39 (N 8960), ×1.41 (K 8960), ×1.07–1.53 at N = 2048 |
+| int8 with B row-major | slower than fp16 (×0.35–1.12): keep weights as `[N, K]` and pass `.t()` |
+
+Conclusions: layer streaming is nearly free (copy < compute, overlap works) → do it. int8 gives
+≈ ×1.4 on the big GEMMs before quantization overhead → maybe −10…15 % of matmul time (≈ −2…3 s per
+run) at a precision risk → after memory work, if time remains.
 
 ## 7. Order of work 31.10 and safety
 
