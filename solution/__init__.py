@@ -8,6 +8,7 @@ it does not handle (CPU tensors, fake modules in Soup's tests, unexpected dtypes
 
 from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
 from .mlp import patch_qwen2_mlp_fp16
+from .nf4 import patch_bnb_nf4
 from .rmsnorm import patch_qwen2_rmsnorm
 from .swiglu import patch_qwen2_mlp
 
@@ -16,6 +17,7 @@ FEATURES = {
     "mlp_fp16": True,        # MLP keeps fp16 activations (uses the example's SwiGLU kernel)
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
+    "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
 }
 
 
@@ -29,3 +31,5 @@ def apply():
     if FEATURES["fused_ce"]:
         patch_qwen2_causal_lm()
         patch_trl_metrics()
+    if FEATURES["nf4"]:
+        patch_bnb_nf4()
