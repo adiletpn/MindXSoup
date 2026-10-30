@@ -64,10 +64,14 @@ class LayerStreamer:
         if free:
             return free[0]
         candidates = [i for i in range(len(self.slots)) if self.slot_layer[i] not in keep]
+        if not candidates:
+            return None
         return min(candidates, key=lambda i: self.slot_used[i])
 
     def _load(self, layer, keep):
         slot = self._victim(keep)
+        if slot is None:  # every slot holds a layer we keep: take the least recently used one
+            slot = min(range(len(self.slots)), key=lambda i: self.slot_used[i])
         old = self.slot_layer[slot]
         if old is not None:
             del self.layer_slot[old]
@@ -111,9 +115,13 @@ class LayerStreamer:
             self._acquire(layer)
             step = 1 if forward else -1
             keep = {layer}
-            for ahead in range(1, PREFETCH + 1):
+            for ahead in range(1, min(PREFETCH, len(self.slots) - 1) + 1):
                 nxt = layer + step * ahead
-                if 0 <= nxt < len(self.groups) and nxt not in self.layer_slot:
+                if not 0 <= nxt < len(self.groups):
+                    break
+                if nxt not in self.layer_slot:
+                    if self._victim(keep | {nxt}) is None:
+                        break  # no slot to spare: the layer is loaded when it is used
                     self._load(nxt, keep=keep | {nxt})
                 keep.add(nxt)
 

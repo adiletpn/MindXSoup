@@ -52,6 +52,8 @@ def blocks(n=5):
 def run(model, hints):
     from solution import stream
 
+    for block in model:
+        block.scale.grad = None
     torch.manual_seed(1)
     h = torch.randn(1, TOKENS, 512, device="cuda", requires_grad=True)
     out = h
@@ -66,7 +68,7 @@ def run(model, hints):
         out = checkpoint(body, out, use_reentrant=False)
         phase["forward"] = False
     out.square().mean().backward()
-    return out.detach(), h.grad, [b.scale.grad for b in model]
+    return out.detach(), h.grad, [b.scale.grad.clone() for b in model]
 
 
 @pytest.mark.parametrize("hints", [True, False])
