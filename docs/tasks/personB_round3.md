@@ -5,6 +5,40 @@ Start: `git checkout main && git pull`, read `README.md`, `docs/results.md`, `do
 into `main`. Rules as before (AGENTS.md §4–5): no `harness/`/`tests/`/`task/`, no hidden rows,
 every claim backed by a Kaggle T4 run; for a speed claim an A/B on one machine.
 
+## Task 0 — TOP PRIORITY: take the tied embedding / lm_head off the GPU (−445 MiB of a 1 739 MiB peak)
+
+Context (31.10, 03:00): with every layer recomputed (`BUDGET_TOKENS = 0`) our peak is **1 739 MiB,
+8.25×, 10/10**. The tied embedding / `lm_head` (151 936 × 1 536 fp16 = 445 MiB) is now a quarter of
+it. The organizers allowed exactly this (QA_NOTES #47): keep frozen embed/lm_head in pinned host
+memory for the whole run and stream the head through the GPU in chunks every step; copies and
+syncs count in the time; values, compute dtypes and outputs unchanged.
+
+Design (all in `solution/`, your branch `offload`):
+
+1. **Where the weight lives.** After Soup prepares the model (our `embedding.py` already keeps it
+   fp16), move it to a pinned CPU tensor; leave a tiny placeholder on the GPU so
+   `get_input_embeddings()`/`get_output_embeddings()` still exist. Input lookup: gather the
+   batch's rows on the CPU (`index_select` on the pinned table, ids copied D2H once per step) and
+   copy the `[N, 1536]` fp16 rows H2D; output cast to fp32 as the base does.
+2. **Head in ONE pass over the vocabulary** (no second pass, so the weight crosses PCIe once per
+   step, ≈ 445 MB ≈ 37 ms at 12 GB/s): for each vocab chunk `Wc` (e.g. 8 192 rows), double-buffered
+   H2D on a side stream with CUDA events, compute `Zc = H16 @ Wc^T` (cuBLAS, fp16) and with one
+   Triton kernel per chunk update per row: running max `m`, `s = Σ e^(z−m)`, `t = Σ e^(z−m)·z`
+   (entropy), argmax, the target logit; then the gradient accumulator like FlashAttention's
+   output: `A ← A·e^(m_old−m_new) + Pc @ Wc` with `Pc = e^(Zc−m_new)` in fp16 (rows rescaled
+   before the matmul or A in fp32). At the end `dH = (A/s − W[target]) / denominator` for labelled
+   rows (gather `W[target]` rows on the CPU like the embedding), `lse = m + log s`, loss
+   `lse − z_target`, entropy `lse − t/s`. Same outputs as our `fused_ce.py` today.
+3. **Anything else** that calls the head or the embedding (eval, generation, Soup's tests with
+   fake modules) must still work: fall back by bringing the weight to the device for that call.
+
+Acceptance: per-token loss / entropy / argmax / dH vs the current `fused_head_ce` within fp16
+rounding (test with the real vocab size); full `--repeats 2` with **10/10**, eval loss within
+±0.05% of the base, peak ≤ 1 350 MiB, time not worse than +2.5 s against `BUDGET_TOKENS = 0`
+without offload, on two seeds. Report the A/B in the PR. If PCIe makes it slower than +2.5 s, try
+larger chunks, more buffers, or overlapping the copy of the first chunks with the last decoder
+layer's forward.
+
 ## Why memory, and how we judge a change
 
 Scores are `35·ln(s)/ln(s_best) + 30·ln(m)/ln(m_best)`. In the chat the best claims are about
@@ -49,7 +83,7 @@ custom autograd function and recompute the repeat in backward). Prototype only i
 
 ## Priority order for the day
 
-**Task 4 first** (safe, pure speed, also grows our kernel share), then **Task 1** (runs in the
+**Task 0 first** (biggest score gain now), then **Task 4** (safe, pure speed, also grows our kernel share), then **Task 1** (runs in the
 background while you code), then **Task 5** (the biggest memory lever, riskier), then Task 2,
 then Task 3. Merge each one separately as soon as it has its own 10/10 run.
 
