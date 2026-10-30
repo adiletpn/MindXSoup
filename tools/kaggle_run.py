@@ -18,6 +18,7 @@ import argparse
 import base64
 import io
 import json
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -25,7 +26,9 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-KAGGLE = str(Path.home() / ".venvs" / "kaggle" / "bin" / "kaggle")
+KAGGLE = next((str(path) for path in (Path.home() / ".venvs" / "kaggle" / "bin" / "kaggle",
+                                       Path.home() / ".venvs" / "kaggle" / "Scripts" / "kaggle.exe")
+               if path.exists()), shutil.which("kaggle") or "kaggle")
 PINS = ('"soup-cli[train]==0.77.0" "transformers==5.16.1" "peft==0.20.0" "trl==0.29.1" '
         '"bitsandbytes==0.50.2" "accelerate==1.14.0" pytest')
 
@@ -38,11 +41,15 @@ shutil.rmtree(REPO, ignore_errors=True)
 os.makedirs(OUT, exist_ok=True)
 tarfile.open(fileobj=io.BytesIO(base64.b64decode(PAYLOAD)), mode="r:gz").extractall(REPO)
 
+FAILED = []
+
 def sh(cmd, log):
     started = time.time()
     with open(os.path.join(OUT, log), "w") as handle:
         proc = subprocess.run(cmd, shell=True, cwd=REPO, stdout=handle, stderr=subprocess.STDOUT)
     print(f"[{{proc.returncode}}] {{time.time() - started:7.1f}} s  {{cmd}}", flush=True)
+    if proc.returncode:
+        FAILED.append(f"{{cmd}} (exit {{proc.returncode}}, see {{log}})")
     return proc.returncode
 
 print(subprocess.run(["nvidia-smi", "--query-gpu=name,memory.used", "--format=csv"],
@@ -80,6 +87,9 @@ for log in sorted(os.listdir(OUT)):
         print(f"\n===== {{log}} (tail) =====")
         with open(os.path.join(OUT, log)) as handle:
             print("".join(handle.readlines()[-40:]))
+with open(os.path.join(OUT, "status.json"), "w") as handle:
+    json.dump({{"failed": FAILED}}, handle, indent=2)
+print("\nFAILED STEPS:\n  " + "\n  ".join(FAILED) if FAILED else "\nALL STEPS EXITED 0")
 '''
 
 
@@ -111,9 +121,14 @@ def main():
     parser.add_argument("--seed", type=int)
     parser.add_argument("--slug", default="mindx-dev")
     parser.add_argument("--no-wait", action="store_true")
+    parser.add_argument("--fetch", action="store_true",
+                        help="only wait for and download an already pushed run of --slug")
     args = parser.parse_args()
 
     user = json.loads((Path.home() / ".kaggle" / "kaggle.json").read_text())["username"]
+    kernel = f"{user}/{args.slug}"
+    if args.fetch:
+        return fetch(kernel, args.mode)
     extra = f"--repeats {args.repeats}" if args.mode == "full" else ""
     if args.mode == "cmd":
         if not args.cmd:
@@ -125,15 +140,17 @@ def main():
     work.mkdir(parents=True, exist_ok=True)
     (work / "run.py").write_text(SCRIPT.format(payload=pack_tree(), mode=args.mode,
                                                extra=extra.strip(), pins=PINS))
-    kernel = f"{user}/{args.slug}"
     (work / "kernel-metadata.json").write_text(json.dumps({
         "id": kernel, "title": args.slug, "code_file": "run.py", "language": "python",
         "kernel_type": "script", "is_private": True, "enable_gpu": True,
         "enable_internet": True, "dataset_sources": [], "competition_sources": [],
         "kernel_sources": []}, indent=2))
     print(kaggle("kernels", "push", "-p", str(work), "--accelerator", "NvidiaTeslaT4"))
-    if args.no_wait:
-        return
+    if not args.no_wait:
+        fetch(kernel, args.mode)
+
+
+def fetch(kernel, mode):
     started = time.time()
     while True:
         time.sleep(30)
@@ -141,10 +158,15 @@ def main():
         print(f"{time.time() - started:6.0f} s  {status.strip()}", flush=True)
         if any(word in status.lower() for word in ("complete", "error", "cancel")):
             break
-    out = REPO / "kaggle_out" / args.mode
+    out = REPO / "kaggle_out" / mode
     out.mkdir(parents=True, exist_ok=True)
     print(kaggle("kernels", "output", kernel, "-p", str(out), "--force", check=False))
     print(f"results in {out}")
+    status = out / "out" / "status.json"
+    failed = json.loads(status.read_text())["failed"] if status.exists() else ["no status.json"]
+    if failed:
+        sys.exit("FAILED:\n  " + "\n  ".join(failed))
+    print("all steps exited 0")
 
 
 if __name__ == "__main__":
