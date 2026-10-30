@@ -144,6 +144,10 @@ run with a different `--seed`.
   use the mean of the two runs per side; jury image = Python 3.13, torch 2.11, CUDA 12.8,
   Triton 3.6.0; only the listed checks are automatic, plus the jury reads the code. Video and
   presentation are not scored but still part of the submission.
+- Q&A part 2: Soup internals may be used as long as our code computes the values and no built-in
+  mode is switched on; frozen embedding in fp16 OK (~445 MB); **a background compile thread
+  inside apply() is explicitly allowed** (e.g. JIT-compile our kernels while the model loads);
+  organizers expect strong teams at s 1.2-1.5 and m 1.5-2.
 
 ---
 
