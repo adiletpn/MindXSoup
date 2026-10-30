@@ -89,8 +89,8 @@ def main():
     fwd_s = timed_first_call(lambda: holder.setdefault("out", apply_rope(q, k, cos, sin)))
     bwd_s = timed_first_call(lambda: torch.autograd.grad(holder["out"], (q, k), grads))
     print(f"forward  first call (compiles the kernel): {fwd_s:6.3f} s")
-    print(f"backward first call (same kernel, cached): {bwd_s:6.3f} s")
-    print(f"total compile + first run : {fwd_s + bwd_s:6.3f} s")
+    print(f"backward first call (same kernel, cached): {bwd_s:6.3f} s"
+          "  (no compile; PyTorch's one-time cost of this first graph backward)")
 
     print("\n== New sequence lengths must not compile again (fp32) ==")
     before = compiled_variants(rope_kernel)
