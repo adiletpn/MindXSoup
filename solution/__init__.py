@@ -14,6 +14,7 @@ from .nf4 import patch_bnb_nf4
 from .rmsnorm import patch_qwen2_rmsnorm
 from .rope import patch_rope
 from .swiglu import patch_qwen2_mlp
+from .unpad import patch_unpad
 
 FEATURES = {
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
@@ -23,6 +24,7 @@ FEATURES = {
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
+    "unpad": True,           # pad tokens never enter the decoder; attention per row
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
 
@@ -48,6 +50,8 @@ def apply():
     if FEATURES["rope"]:
         patch_rope()
         jobs.append(warmup.compile_rope)
+    if FEATURES["unpad"]:
+        patch_unpad()  # used by the fused head's forward
     if FEATURES["fp16_embedding"]:
         patch_fp16_embedding()  # after fused_ce: wraps whichever forward is in place
     # wait() runs in the fused head's forward; without it the thread just finishes on its own
