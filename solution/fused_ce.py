@@ -28,7 +28,7 @@ import triton.language as tl
 from . import stream, unpad, warmup
 
 IGNORE_INDEX = -100
-CHUNK = 512          # rows per head matmul: 512 x 151936 fp16 logits = 155 MB
+CHUNK = 256          # rows per head matmul: 256 x 151936 fp16 logits = 78 MB
 VOCAB_BLOCK = 4096
 # The gradient is written into the fp16 logits buffer scaled by GRAD_SCALE so that small
 # probabilities stay representable; it is divided out in fp32 after the matmul.

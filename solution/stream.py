@@ -18,7 +18,7 @@ import threading
 
 import torch
 
-SLOTS = 4
+SLOTS = 3
 PREFETCH = 2
 
 _streamer = None

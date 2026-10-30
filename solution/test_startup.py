@@ -70,3 +70,19 @@ def test_dynamo_flag_is_restored():
     before = os.environ.get("TORCHDYNAMO_DISABLE")
     import_bitsandbytes_without_compile_wrappers()
     assert os.environ.get("TORCHDYNAMO_DISABLE") == before
+
+
+def test_gpu_dtype_conversion_is_bit_identical():
+    import pytest
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    torch.manual_seed(0)
+    values = torch.cat([torch.randn(1 << 20) * scale for scale in (1e-8, 1e-5, 1e-2, 1, 1e3, 1e5)])
+    values = torch.cat([values, torch.tensor([0.0, -0.0, 65504.0, 65520.0, 7e4, -7e4,
+                                              5.96e-8, 2.98e-8, float("inf"), float("nan")])])
+    source = values.to(torch.bfloat16)
+    cpu = source.to(torch.float16)
+    gpu = source.cuda().to(torch.float16).cpu()
+    assert torch.equal(cpu.view(torch.int16), gpu.view(torch.int16))
