@@ -1,4 +1,4 @@
-# Dilya — round 3 (31.10): memory without losing time
+# Dilya — round 3 (31.10): faster NF4, memory without losing time
 
 Start: `git checkout main && git pull`, read `README.md`, `docs/results.md`, `docs/QA_NOTES.md`,
 `docs/memory_audit_solution.md`. Each task in its own branch (`budget`, `norm16`, …) and its own PR
@@ -46,6 +46,73 @@ for each row. Measure what attention saves per layer now (a saved-tensors hook, 
 `tools/memory_audit.py`), and propose a way to keep k/v at 2 heads for backward (repeat inside a
 custom autograd function and recompute the repeat in backward). Prototype only if it saves
 ≥100 MiB at the peak.
+
+## Priority order for the day
+
+**Task 4 first** (safe, pure speed, also grows our kernel share), then **Task 1** (runs in the
+background while you code), then **Task 5** (the biggest memory lever, riskier), then Task 2,
+then Task 3. Merge each one separately as soon as it has its own 10/10 run.
+
+## Task 4 — make `nf4_unpack_kernel` run at memory speed (HIGH VALUE, ≈3–4 h)
+
+Facts: it is our largest kernel, **8.2% of the training time** (≈2.2 s of a ≈27 s timed loop,
+≈395 launches per step: every Linear4bit in forward, in backward and again in recomputed layers).
+It is purely memory-bound: it reads 0.5 byte and writes 2 bytes (fp16) per weight. Writing
+≈5–6 GB per step at the T4's ≈320 GB/s should take ≈18–20 ms per step; it takes ≈36 ms now, so
+there is ≈1 s of wall time to win, with no change in values or memory.
+
+Ideas to try (measure each with a microbenchmark on the real shapes — 1536×1536, 256×1536,
+1536×8960, 8960×1536 — against bandwidth = bytes moved / time, then A/B in the full run):
+
+1. **Wider loads and stores.** Load the packed bytes as `int32` (4 bytes = 8 values) instead of
+   one `uint8` per lane; build the 8 fp16 values and store them as one 16-byte vector. Today each
+   lane loads 1 byte and `tl.interleave` makes the store pattern 2-wide.
+2. **Bigger programs, fewer launches.** `BYTES_PER_PROGRAM = 1024` gives ≈1150 programs for the
+   1536×1536 matrix and ≈6700 for the MLP ones; try 2048/4096 bytes per program and
+   `num_warps` 4/8 (fixed values, no autotune: compile time counts).
+3. **Scale once per 64 values, not per value.** The absmax of a block is the same for its 32
+   bytes; load `absmax_8bit`, `code[q8]`, `absmax2` once per block (a `[BLOCKS, 32]` tile) instead
+   of once per byte through a gather.
+4. **Table in registers.** The 16-entry NF4 table can be a `tl.constexpr`-built select chain or a
+   tiny tensor loaded once per program; compare with the current gather from global memory.
+5. **Skip the second dequantization.** In backward bitsandbytes calls `dequantize_4bit` again for
+   the same weight that forward just unpacked (and recomputation unpacks it a third time). Check
+   whether caching **only the most recent layer's** fp16 weight across forward→backward of the
+   same module is possible without raising the peak (it never is for all layers: 94 MB per layer).
+
+Must stay bit-identical to bitsandbytes (`solution/test_nf4.py` already checks it; keep those
+tests and add the new shapes). Deliverable: faster kernel, microbenchmark table (GB/s before and
+after for each shape) in the PR, A/B on one machine, `full --repeats 2` with 10/10.
+
+## Task 5 — compact storage of the MLP activations (BIGGEST MEMORY LEVER, ≈4–5 h, experimental)
+
+Facts: the organizers' SwiGLU example keeps `gate` and `up` in fp16 for backward:
+2 × N × 8960 × 2 bytes ≈ **72 MB per layer at N = 2048**, ≈1 GB at the peak (the audit's largest
+group with attention). Forward does not depend on how these are stored; only the gradient that
+flows back through SwiGLU does. The organizers allow storing activations in low precision in our
+own code (QA_NOTES #32: "yes, the choice of precision is yours; the LoRA adapter does not change;
+watch for fp16 overflow").
+
+This needs our **own** SwiGLU autograd function and kernels (the example's kernels are not ours
+and its code must not be copied: write it from scratch; the AST-similarity check reads the
+example). Options, from safest to boldest:
+
+1. **Recompute `up` instead of storing it?** No — that is a matmul; skip.
+2. **Store `silu(gate)` and `up` packed differently**: the backward needs `gate` (for silu') and
+   `up`. Check if storing `gate` in fp16 and `up` in **bf16-like 8-bit** loses anything measurable.
+3. **8-bit with a per-row (per-token) scale**: `q = round(x / s * 127)`, `s = max|x|` of the row,
+   int8 storage + one fp16 scale per row → half the bytes. Error ≤ s/254 per element.
+4. **fp8 e4m3 / e5m2 by bit manipulation** (T4 has no fp8 compute, but storage is just bytes):
+   e5m2 is the top byte of fp16 with rounding, so pack/unpack is one shift; e4m3 needs a scale.
+5. **Store only one tensor**: keep `gate` and the product `h = silu(gate)·up` (needed anyway as
+   the input of `down_proj`? check whether bitsandbytes keeps it — it does not, the weight is
+   frozen), and recover `up = h / silu(gate)` where `silu(gate)` is not tiny; store an exception
+   mask for the rest. Bold; only if 3/4 fail.
+
+Acceptance (strict, because a FAIL costs everything): loss curve (check 6) first step 0.00%,
+mean ≤ 0.05%; eval loss within ±0.05% of the base on **two seeds** (1 and 7) and on Dilya's
+swapped-data run; peak lower by ≥ 300 MiB; time not worse by more than 1%. If any of those fails,
+keep fp16 and write what you saw — a negative result with numbers is still useful for the README.
 
 ## Report (in each PR)
 
