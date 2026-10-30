@@ -88,3 +88,27 @@ def skip_unused_optional_imports():
             import trl.trainer.base_trainer  # noqa: F401
         finally:
             transformers.__dict__.pop("is_wandb_available", None)  # lazy attribute again
+
+
+def import_bitsandbytes_without_compile_wrappers():
+    """bitsandbytes wraps several functions of its CPU backend in torch.compile when it is imported
+    (backends/default/ops.py, `_try_torch_compile`); building those wrappers takes ≈1.2 s on Kaggle
+    and the run never calls them (training uses the CUDA backend). TORCHDYNAMO_DISABLE is set only
+    while bitsandbytes is imported and restored right after, so nothing imported or run later sees
+    it (organizers: allowed under exactly these conditions, 31.10)."""
+    import os
+    import sys
+
+    if "bitsandbytes" in sys.modules:
+        return
+    previous = os.environ.get("TORCHDYNAMO_DISABLE")
+    os.environ["TORCHDYNAMO_DISABLE"] = "1"
+    try:
+        import bitsandbytes  # noqa: F401
+    except Exception:  # noqa: BLE001 - our patches import it again and report properly
+        pass
+    finally:
+        if previous is None:
+            os.environ.pop("TORCHDYNAMO_DISABLE", None)
+        else:
+            os.environ["TORCHDYNAMO_DISABLE"] = previous
