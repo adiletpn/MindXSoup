@@ -113,3 +113,37 @@ def test_setup_skips_models_it_cannot_stream():
         assert not stream.active()
     finally:
         stream.enabled = False
+
+
+def test_offload_at_load_gives_the_same_model(tmp_path):
+    import bitsandbytes as bnb
+    from transformers import BitsAndBytesConfig, Qwen2Config, Qwen2ForCausalLM
+
+    from solution import linear4bit, stream
+    from solution.nf4 import patch_bnb_nf4
+
+    patch_bnb_nf4()
+    linear4bit.patch_bnb_linear4bit()
+    config = Qwen2Config(vocab_size=512, hidden_size=256, intermediate_size=512,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+                         tie_word_embeddings=True)
+    torch.manual_seed(0)
+    Qwen2ForCausalLM(config).half().save_pretrained(tmp_path)
+    quant = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                               bnb_4bit_use_double_quant=True,
+                               bnb_4bit_compute_dtype=torch.float16)
+    load = lambda: Qwen2ForCausalLM.from_pretrained(  # noqa: E731
+        tmp_path, quantization_config=quant, device_map={"": 0}, dtype=torch.float16)
+    reference = load()
+    stream.enabled = True
+    stream.patch_offload_at_load()
+    try:
+        got = load()
+    finally:
+        stream.enabled = False
+    layers = [m for m in got.model.layers.modules() if isinstance(m, bnb.nn.Linear4bit)]
+    assert len(layers) == 14 and all(stream.offloaded(m) for m in layers)
+    assert all(m.weight.data.untyped_storage().nbytes() == 1 for m in layers)
+    ids = torch.randint(0, 512, (1, TOKENS), device="cuda")
+    with torch.no_grad():
+        assert torch.equal(reference(input_ids=ids).logits, got(input_ids=ids).logits)

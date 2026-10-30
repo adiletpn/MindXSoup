@@ -30,20 +30,16 @@ class LayerStreamer:
         self.groups = groups  # per decoder layer, its Linear4bit modules in call order
         self.lock = threading.RLock()
         self.copy_stream = torch.cuda.Stream()
-        self.entries = {}  # id(module) -> (layer, offset, numel, shape)
-        self.host = []
+        self.entries = {}  # id(module) -> (layer, offset in the slot, numel, shape)
         sizes = []
         for layer, modules in enumerate(groups):
-            total = sum(m.weight.data.numel() for m in modules)
-            sizes.append(total)
-            host = torch.empty(total, dtype=torch.uint8, pin_memory=True)
             offset = 0
             for module in modules:
-                data = module.weight.data
-                host[offset:offset + data.numel()].copy_(data.reshape(-1))
-                self.entries[id(module)] = (layer, offset, data.numel(), tuple(data.shape))
-                offset += data.numel()
-            self.host.append(host)
+                offload(module.weight)  # no-op when it already left the GPU at load time
+                numel = module.weight._mindx_host.numel()
+                self.entries[id(module)] = (layer, offset, numel, module.weight._mindx_shape)
+                offset += numel
+            sizes.append(offset)
         self.slot_bytes = max(sizes)
         self.slots = [torch.empty(self.slot_bytes, dtype=torch.uint8, device="cuda")
                       for _ in range(min(slots, len(groups)))]
@@ -53,11 +49,6 @@ class LayerStreamer:
         self.layer_slot = {}
         self.clock = 0
         self.current = None
-        # all bytes are on the host now: replace the GPU copies by 1-byte placeholders
-        for modules in groups:
-            for module in modules:
-                shape = module.weight.data.shape
-                module.weight.data = torch.empty(1, dtype=torch.uint8, device="cuda").expand(shape)
 
     def _victim(self, keep):
         free = [i for i, layer in enumerate(self.slot_layer) if layer is None]
@@ -80,8 +71,10 @@ class LayerStreamer:
         done.record(torch.cuda.current_stream())
         with torch.cuda.stream(self.copy_stream):
             self.copy_stream.wait_event(done)
-            size = self.host[layer].numel()
-            self.slots[slot][:size].copy_(self.host[layer], non_blocking=True)
+            for module in self.groups[layer]:
+                _, offset, numel, _ = self.entries[id(module)]
+                self.slots[slot][offset:offset + numel].copy_(module.weight._mindx_host,
+                                                              non_blocking=True)
             ready = torch.cuda.Event()
             ready.record(self.copy_stream)
         self.slot_layer[slot] = layer
@@ -129,6 +122,31 @@ class LayerStreamer:
         return id(module) in self.entries
 
 
+def offload(param):
+    """Move a quantized Params4bit's packed bytes to pinned host memory, once; a 1-byte placeholder
+    of the same shape and dtype stays on the GPU, so the module still looks like a CUDA weight."""
+    if hasattr(param, "_mindx_host"):
+        return
+    data = param.data
+    host = torch.empty(data.numel(), dtype=torch.uint8, pin_memory=True)
+    host.copy_(data.reshape(-1))
+    param._mindx_host, param._mindx_shape = host, tuple(data.shape)
+    param.data = torch.empty(1, dtype=torch.uint8, device=data.device).expand(data.shape)
+
+
+def offloaded(module):
+    return hasattr(getattr(module, "weight", None), "_mindx_host")
+
+
+def packed_for(module):
+    """The module's packed NF4 bytes on the GPU: from the streamer's slots, or (before the
+    streamer exists, e.g. a forward before training) a one-off synchronous copy."""
+    if _streamer is not None and _streamer.owns(module):
+        return _streamer.packed_for(module)
+    weight = module.weight
+    return weight._mindx_host.to(weight.device).view(weight._mindx_shape)
+
+
 def active():
     return _streamer is not None
 
@@ -146,7 +164,8 @@ def _layer_modules(layer):
 def _streamable(module):
     weight = module.weight
     state = getattr(weight, "quant_state", None)
-    return (weight.is_cuda and weight.dtype == torch.uint8 and weight.data.is_contiguous()
+    return (weight.is_cuda and weight.dtype == torch.uint8
+            and (hasattr(weight, "_mindx_host") or weight.data.is_contiguous())
             and state is not None and getattr(state, "nested", False)
             and state.quant_type == "nf4" and state.blocksize == 64
             and getattr(state, "state2", None) is not None and state.state2.blocksize == 256
@@ -174,6 +193,52 @@ def setup(causal_lm):
     _streamer = LayerStreamer(groups)
 
 
+def _offload_at_load(name, value):
+    state = getattr(value, "quant_state", None)
+    return (".layers." in name and getattr(value, "bnb_quantized", False) and value.is_cuda
+            and value.dtype == torch.uint8 and state is not None
+            and getattr(state, "nested", False) and state.quant_type == "nf4"
+            and state.blocksize == 64 and state.dtype == torch.float16)
+
+
+def patch_offload_at_load():
+    """While transformers loads the model, move each decoder weight to the host right after
+    bitsandbytes quantizes it, so the 4-bit layers never sit on the GPU all at once (the memory
+    peak covers loading too). transformers' caching_allocator_warmup, which reserves GPU memory for
+    the whole model up front only to speed up loading, is skipped: that reservation would stay in
+    PyTorch's pool and in nvidia-smi's peak."""
+    from transformers import modeling_utils
+    from transformers.integrations import bitsandbytes as hf_bnb
+
+    cls = hf_bnb.Bnb4bitQuantize
+    if not getattr(cls, "_mindx_offload", False):
+        original = cls.convert
+
+        def convert(self, *args, **kwargs):
+            result = original(self, *args, **kwargs)
+            if enabled and isinstance(result, dict):
+                for name, value in result.items():
+                    if _offload_at_load(name, value):
+                        offload(value)
+            return result
+
+        cls.convert = convert
+        cls._mindx_offload = True
+    if not getattr(modeling_utils.caching_allocator_warmup, "_mindx_patched", False):
+        original_warmup = modeling_utils.caching_allocator_warmup
+
+        def caching_allocator_warmup(model, expanded_device_map, hf_quantizer):
+            if enabled and hf_quantizer is not None and \
+                    getattr(getattr(hf_quantizer, "quantization_config", None),
+                            "load_in_4bit", False):
+                return None
+            return original_warmup(model, expanded_device_map, hf_quantizer)
+
+        caching_allocator_warmup._mindx_patched = True
+        modeling_utils.caching_allocator_warmup = caching_allocator_warmup
+
+
 def patch_stream_layers():
     global enabled
     enabled = True
+    patch_offload_at_load()

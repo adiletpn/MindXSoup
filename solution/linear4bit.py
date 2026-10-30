@@ -62,14 +62,14 @@ class NF4StreamFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, module, state, bias):
         ctx.module, ctx.state = module, state
-        packed = stream.streamer().packed_for(module)
+        packed = stream.packed_for(module)
         return torch.nn.functional.linear(x, _unpack(packed, state, x.dtype), bias)
 
     @staticmethod
     def backward(ctx, grad):
         grad_x = None
         if ctx.needs_input_grad[0]:
-            packed = stream.streamer().packed_for(ctx.module)
+            packed = stream.packed_for(ctx.module)
             grad_x = torch.matmul(grad, _unpack(packed, ctx.state, ctx.state.dtype)
                                   .to(grad.dtype))
         return grad_x, None, None, None
@@ -130,8 +130,7 @@ def patch_bnb_linear4bit():
     original = cls.forward
 
     def forward(self, x):
-        if stream.active() and isinstance(x, torch.Tensor) and x.is_cuda \
-                and stream.streamer().owns(self):
+        if isinstance(x, torch.Tensor) and x.is_cuda and stream.offloaded(self):
             return _streamed_forward(self, x)
         if not _direct_ok(self, x):
             return original(self, x)
