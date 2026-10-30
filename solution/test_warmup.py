@@ -89,7 +89,11 @@ def test_nf4():
         for out_features in (1536, 256, 8960):
             layer = bnb.nn.Linear4bit(1536, out_features, bias=False,
                                       compute_dtype=torch.float16, compress_statistics=True,
-                                      quant_type="nf4").cuda()
+                                      quant_type="nf4")
+            # Soup loads the checkpoint in fp16 on a T4, so the quant state's dtype is fp16
+            layer.weight.data = layer.weight.data.half()
+            layer = layer.cuda()
+            assert layer.weight.quant_state.dtype == torch.float16
             x = torch.randn(BATCH, TOKENS, 1536, device="cuda", dtype=torch.float16,
                             requires_grad=True)
             layer(x).sum().backward()
