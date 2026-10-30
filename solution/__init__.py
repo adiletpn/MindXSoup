@@ -75,6 +75,7 @@ def apply():
         jobs.append(compile_qkv_rope)
     if FEATURES["unpad"]:
         patch_unpad()  # used by the fused head's forward
+        jobs.append(warmup.compile_lora_dropout)
     if FEATURES["recompute"]:
         patch_qwen2_layer_recompute()
     if FEATURES["stream_weights"] and FEATURES["nf4"] and FEATURES["nf4_direct"]:
