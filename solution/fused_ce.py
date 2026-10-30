@@ -25,7 +25,7 @@ import torch
 import triton
 import triton.language as tl
 
-from . import unpad, warmup
+from . import stream, unpad, warmup
 
 IGNORE_INDEX = -100
 CHUNK = 512          # rows per head matmul: 512 x 151936 fp16 logits = 155 MB
@@ -192,6 +192,8 @@ def patch_qwen2_causal_lm():
                 past_key_values=None, inputs_embeds=None, labels=None, use_cache=None,
                 logits_to_keep=0, **kwargs):
         warmup.wait()  # kernels compiled in the background while the model loaded
+        if self.training and isinstance(self, torch.nn.Module):
+            stream.setup(self)  # decoder weights to the host, once (stream.py)
         keep_all = logits_to_keep is None or (isinstance(logits_to_keep, int)
                                               and logits_to_keep == 0)
         if labels is None or not self.training or not keep_all or "shift_labels" in kwargs \

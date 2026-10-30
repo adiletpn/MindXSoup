@@ -15,6 +15,7 @@ import contextlib
 
 import torch
 
+from . import stream
 from .nf4 import _supported, unpack_nf4
 
 _enabled = True
@@ -52,6 +53,40 @@ class NF4LinearFunction(torch.autograd.Function):
             grad_x = torch.matmul(grad, _unpack(ctx.packed, ctx.state, ctx.state.dtype)
                                   .to(grad.dtype))
         return grad_x, None, None, None
+
+
+class NF4StreamFunction(torch.autograd.Function):
+    """NF4LinearFunction for a module whose bytes live on the host (stream.py): the bytes are
+    asked for right before each use, in forward and again in backward."""
+
+    @staticmethod
+    def forward(ctx, x, module, state, bias):
+        ctx.module, ctx.state = module, state
+        packed = stream.streamer().packed_for(module)
+        return torch.nn.functional.linear(x, _unpack(packed, state, x.dtype), bias)
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad_x = None
+        if ctx.needs_input_grad[0]:
+            packed = stream.streamer().packed_for(ctx.module)
+            grad_x = torch.matmul(grad, _unpack(packed, ctx.state, ctx.state.dtype)
+                                  .to(grad.dtype))
+        return grad_x, None, None, None
+
+
+def _streamed_forward(layer, x):
+    """Linear4bit.forward's own steps (input to the compute dtype, bias cast, output back to the
+    input dtype) around the streamed matmul."""
+    inp_dtype = x.dtype
+    if layer.compute_dtype is not None:
+        x = x.to(layer.compute_dtype)
+    bias = layer.bias
+    if bias is not None:
+        if bias.dtype != x.dtype:
+            bias.data = bias.data.to(x.dtype)
+        bias = bias.to(layer.compute_dtype)
+    return NF4StreamFunction.apply(x, layer, layer.weight.quant_state, bias).to(inp_dtype)
 
 
 def _bnb_picks_fused_kernel(x, state):
@@ -95,6 +130,9 @@ def patch_bnb_linear4bit():
     original = cls.forward
 
     def forward(self, x):
+        if stream.active() and isinstance(x, torch.Tensor) and x.is_cuda \
+                and stream.streamer().owns(self):
+            return _streamed_forward(self, x)
         if not _direct_ok(self, x):
             return original(self, x)
         bias = self.bias

@@ -20,7 +20,7 @@ import math
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from . import unpad
+from . import stream, unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
 BUDGET_TOKENS = 0  # 0: every layer of every batch reruns (best score in our runs: 8.25x memory)
@@ -52,16 +52,23 @@ def patch_qwen2_layer_recompute():
             getattr(getattr(attn, "config", None), "num_hidden_layers", None)
         if layer is None or n_layers is None or \
                 layer >= layers_to_rerun(hidden_states.shape[0] * hidden_states.shape[1], n_layers):
+            if layer is not None and stream.active():
+                stream.streamer().layer_begins(layer, forward=True)
             return original(self, hidden_states, *args, **kwargs)
         rows = unpad._rows
+        phase = {"forward": True}  # the first call of run is the forward, later ones recompute
 
         def run(hidden):
+            if stream.active():
+                stream.streamer().layer_begins(layer, forward=phase["forward"])
             if rows is None:
                 return original(self, hidden, *args, **kwargs)
             with unpad.packed(*rows):
                 return original(self, hidden, *args, **kwargs)
 
-        return checkpoint(run, hidden_states, use_reentrant=False, preserve_rng_state=True)
+        out = checkpoint(run, hidden_states, use_reentrant=False, preserve_rng_state=True)
+        phase["forward"] = False
+        return out
 
     cls.forward = forward
     cls._mindx_recompute = True
