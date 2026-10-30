@@ -16,8 +16,10 @@ from .nf4 import patch_bnb_nf4
 from .recompute import patch_qwen2_layer_recompute
 from .rmsnorm import patch_qwen2_rmsnorm
 from .rope import patch_rope
-from .startup import (cache_package_distributions, import_bitsandbytes_without_compile_wrappers,
-                      skip_in_memory_map_hashing, skip_unused_optional_imports)
+from .startup import (cache_package_distributions, convert_dtype_on_gpu_at_load,
+                      import_bitsandbytes_without_compile_wrappers, skip_in_memory_map_hashing,
+                      skip_unused_optional_imports)
+from .stream import patch_stream_layers
 from .swiglu import patch_qwen2_mlp
 from .unpad import patch_unpad
 
@@ -34,6 +36,7 @@ FEATURES = {
     "attention_fp16": True,  # ours (teammate): fp16 q/k/v, one kernel for LoRA sum + RoPE + cast
     "unpad": True,           # pad tokens never enter the decoder; attention per row
     "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
+    "stream_weights": True,  # decoder 4-bit weights in pinned host memory, one layer on the GPU at a time
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
 
@@ -45,6 +48,7 @@ def apply():
         cache_package_distributions()  # before trl, imported further down
         skip_in_memory_map_hashing()
         skip_unused_optional_imports()  # before the patches below import transformers' models
+        convert_dtype_on_gpu_at_load()
     if FEATURES["example_swiglu"]:
         patch_qwen2_mlp()
     if FEATURES["mlp_fp16"]:
@@ -73,6 +77,8 @@ def apply():
         patch_unpad()  # used by the fused head's forward
     if FEATURES["recompute"]:
         patch_qwen2_layer_recompute()
+    if FEATURES["stream_weights"] and FEATURES["nf4"] and FEATURES["nf4_direct"]:
+        patch_stream_layers()  # set up by the fused head's forward, before the first step
     if FEATURES["fp16_embedding"]:
         patch_fp16_embedding()  # after fused_ce: wraps whichever forward is in place
     # wait() runs in the fused head's forward; without it the thread just finishes on its own

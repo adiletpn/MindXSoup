@@ -10,6 +10,8 @@ a fresh dict of fresh lists per call, so no caller can change what another one s
 
 import importlib.metadata
 
+import torch
+
 
 def cache_package_distributions():
     if getattr(importlib.metadata.packages_distributions, "_mindx_patched", False):
@@ -112,3 +114,40 @@ def import_bitsandbytes_without_compile_wrappers():
             os.environ.pop("TORCHDYNAMO_DISABLE", None)
         else:
             os.environ["TORCHDYNAMO_DISABLE"] = previous
+
+
+GPU_CONVERT_MAX_BYTES = 64 * 2**20
+
+
+def convert_dtype_on_gpu_at_load():
+    """transformers materializes each checkpoint tensor with `.to(device, dtype)`: for this bf16
+    checkpoint loaded in fp16 on a T4, that converts 1.5 B values on Kaggle's CPU before the copy
+    (the largest item outside the training loop in a py-spy profile of our run). Copying the bf16
+    bytes first (same size) and converting on the GPU gives the same values (IEEE round to
+    nearest even either way, tested bit for bit). Only tensors up to 64 MiB, so the GPU never holds
+    both copies of the 445 MiB embedding."""
+    from transformers import core_model_loading as loading
+
+    original = loading._materialize_copy
+    if getattr(original, "_mindx_patched", False):
+        return
+
+    def _materialize_copy(tensor, device=None, dtype=None):
+        if device is None or dtype is None:
+            return original(tensor, device, dtype)
+        try:
+            target = device if isinstance(device, torch.device) else torch.device(device)
+        except (RuntimeError, TypeError):
+            return original(tensor, device, dtype)
+        source = tensor[...]  # reads the tensor from the safetensors file
+        if (target.type == "cuda" and source.device.type == "cpu" and source.dtype != dtype
+                and source.dtype in _FLOATS and dtype in _FLOATS
+                and source.numel() * source.element_size() <= GPU_CONVERT_MAX_BYTES):
+            return source.to(device=target).to(dtype=dtype)
+        return source.to(device=device, dtype=dtype)
+
+    _materialize_copy._mindx_patched = True
+    loading._materialize_copy = _materialize_copy
+
+
+_FLOATS = (torch.bfloat16, torch.float16, torch.float32)
