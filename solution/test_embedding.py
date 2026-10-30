@@ -79,7 +79,8 @@ def test_prepare_keeps_the_fp16_embedding():
     from solution.embedding import _prepare_keeping_fp16
 
     config = Qwen2Config(vocab_size=1000, hidden_size=64, intermediate_size=128,
-                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2)
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+                         tie_word_embeddings=True)  # as Qwen2.5-1.5B; the config default is False
     torch.manual_seed(0)
     loaded = Qwen2ForCausalLM(config).half().cuda()  # as Soup loads it on a T4
     base = copy.deepcopy(loaded)
