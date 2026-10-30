@@ -14,3 +14,35 @@
 - Кривая loss: первый шаг 0,01%, среднее 0,01%. Метрики и rewind совпадают.
 - `apply()` занимает 7,4 с — разобрать (импорты, которые иначе были бы позже, или лишнее).
 - Версии: Python 3.13.15, torch 2.11.0+cu128, Triton 3.6.0.
+
+## Person A verification: 2026-10-30 16:39 UTC+05:00
+
+Code: `5a2ae0a` (solution unchanged); Kaggle T4; seed 1; `--repeats 2` (base, solution, solution, base).
+Run: https://www.kaggle.com/code/ansargabit/mindx-audit-full-5a2ae0a (version 2).
+Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_out/full/out/pytest_solution.log`.
+
+**36 kernel tests PASS; 79 Soup regression tests PASS; all 10 official checks PASS.**
+
+| Run | Wall s | GPU peak MiB | Train loop s | Median step s | apply s | Torch allocated MiB | Torch reserved MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| base_1 | 85.02 | 14345 | 57.24 | 0.9002 | None | 13373.2 | 14202.0 |
+| base_2 | 85.49 | 14345 | 59.08 | 0.9327 | None | 13373.2 | 14202.0 |
+| solution_1 | 73.53 | 6341 | 47.16 | 0.6551 | 9.03 | 6069.2 | 6198.0 |
+| solution_2 | 73.08 | 6341 | 46.56 | 0.6482 | 8.93 | 6069.2 | 6198.0 |
+
+- Official summary: wall 85.25 -> 73.31 s (**1.1629x** speedup; approximately 14% less wall time).
+- GPU peak 14,345 -> 6,341 MiB (**2.2623x** memory ratio; approximately 55.8% less memory).
+- Eval loss: **2.04965 / 2.04965**, reported delta 0.000%.
+- Own kernels: **8.7% minimum** across solution runs, above the 5% gate.
+- Aggregation follows the actual harness: median wall time, maximum nvidia-smi peak across repeats. With two runs, the time median equals their mean.
+- Environment: Python 3.13.15, torch 2.11.0+cu128, Triton 3.6.0; task library pins unchanged.
+- The initial pre-verification launch (version 1) received CPU only and failed before tests; it is not a benchmark result.
+- Extra seed 7 verification is in progress.
+
+### Audit deliverables
+
+- `docs/memory_audit.md`: requested 512-token diagnostic OOM plus successful 384-token diagnostic.
+- `docs/profile_base.md`: 16 active baseline profile steps, grouped GPU times and top 30 kernels.
+- `docs/startup_time.md`: diagnostic startup stages and official wall-minus-loop observations.
+- The existing captain-owned Kaggle launcher assumes a Unix executable path; on Windows it was imported and its `KAGGLE` variable set to the installed `Scripts/kaggle.exe`, without editing it.
+- The launcher does not propagate command failures; success above was verified from test logs and all ten entries in `checks.json`, not just Kaggle job status.
