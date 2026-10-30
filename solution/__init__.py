@@ -33,7 +33,7 @@ FEATURES = {
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
     "attention_fp16": True,  # ours (teammate): fp16 q/k/v, one kernel for LoRA sum + RoPE + cast
     "unpad": True,           # pad tokens never enter the decoder; attention per row
-    "recompute": True,       # long batches rerun some layers in backward to cap the activations
+    "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
 
