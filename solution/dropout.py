@@ -5,7 +5,7 @@ To keep the base run's random numbers, unpad.py draws the dropout mask exactly a
 values, so a persistent buffer of ones serves). This kernel then does in one pass what took five
 PyTorch ops (gather of the real-token rows of the mask, compare, scale, masked fill, and the
 fp16 cast that autocast applies right after for lora_A): out = x * scale where the mask kept the
-element, else 0, written in the dtype lora_A consumes. Backward is one launch too:
+element, else 0, written in the dtype lora_A consumes. Backward is the same kernel (BACKWARD):
 dx = grad * scale where kept, else 0, in the input's dtype. Same values as torch's dropout.
 """
 
@@ -13,32 +13,33 @@ import torch
 import triton
 import triton.language as tl
 
-BACKWARD_BLOCK = 1024
-
-
 @triton.jit
-def lora_dropout_fwd_kernel(x_ptr, drawn_ptr, index_ptr, out_ptr, keep_ptr, scale,
-                            COLS: tl.constexpr, BLOCK: tl.constexpr):
+def lora_dropout_kernel(src_ptr, drawn_ptr, index_ptr, keep_ptr, out_ptr, scale,
+                        COLS: tl.constexpr, BLOCK: tl.constexpr, BACKWARD: tl.constexpr):
+    # One program per packed token row.
+    # forward:  out = x * scale where the base's draw kept the element; the row of the draw is
+    #           the token's row in the padded [B * T, hidden] tensor (index); keep is stored
+    # backward: dx = grad * scale where kept (keep read back), in the input's dtype
     row = tl.program_id(0)
-    source = tl.load(index_ptr + row)  # this token's row in the padded [B * T, hidden] draw
     cols = tl.arange(0, BLOCK)
     valid = cols < COLS
-    keep = tl.load(drawn_ptr + source * COLS + cols, mask=valid, other=0.0) != 0.0
-    x = tl.load(x_ptr + row * COLS + cols, mask=valid, other=0.0)
-    out = tl.where(keep, x * scale, 0.0)
-    tl.store(out_ptr + row * COLS + cols, out.to(out_ptr.dtype.element_ty), mask=valid)
-    tl.store(keep_ptr + row * COLS + cols, keep.to(tl.int8), mask=valid)
+    here = row * COLS + cols
+    if BACKWARD:
+        keep = tl.load(keep_ptr + here, mask=valid, other=0) != 0
+    else:
+        source = tl.load(index_ptr + row)
+        keep = tl.load(drawn_ptr + source * COLS + cols, mask=valid, other=0.0) != 0.0
+        tl.store(keep_ptr + here, keep.to(tl.int8), mask=valid)
+    value = tl.load(src_ptr + here, mask=valid, other=0.0).to(tl.float32)
+    result = tl.where(keep, value * scale, 0.0)
+    tl.store(out_ptr + here, result.to(out_ptr.dtype.element_ty), mask=valid)
 
 
-# n_elements changes with every batch; not specialized, so it never recompiles
-@triton.jit(do_not_specialize=["n_elements"])
-def lora_dropout_bwd_kernel(grad_ptr, keep_ptr, dx_ptr, n_elements, scale, BLOCK: tl.constexpr):
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    valid = offsets < n_elements
-    grad = tl.load(grad_ptr + offsets, mask=valid, other=0.0).to(tl.float32)
-    keep = tl.load(keep_ptr + offsets, mask=valid, other=0)
-    dx = tl.where(keep != 0, grad * scale, 0.0)
-    tl.store(dx_ptr + offsets, dx.to(dx_ptr.dtype.element_ty), mask=valid)
+def _launch(src, drawn, index, keep, out, scale, backward):
+    rows, cols = src.shape[-2], src.shape[-1]
+    block = triton.next_power_of_2(cols)
+    lora_dropout_kernel[(rows,)](src, drawn, index, keep, out, scale, COLS=cols, BLOCK=block,
+                                 BACKWARD=backward, num_warps=8 if block >= 2048 else 4)
 
 
 class PackedDropout(torch.autograd.Function):
@@ -51,9 +52,7 @@ class PackedDropout(torch.autograd.Function):
         rows, cols = x.shape[1], x.shape[2]
         out = torch.empty((1, rows, cols), dtype=out_dtype, device=x.device)
         keep = torch.empty((rows, cols), dtype=torch.int8, device=x.device)
-        block = triton.next_power_of_2(cols)
-        lora_dropout_fwd_kernel[(rows,)](x, drawn, index, out, keep, scale, COLS=cols,
-                                         BLOCK=block, num_warps=8 if block >= 2048 else 4)
+        _launch(x, drawn, index, keep, out, scale, backward=False)
         ctx.save_for_backward(keep)
         ctx.scale, ctx.x_dtype = scale, x.dtype
         return out
@@ -63,9 +62,8 @@ class PackedDropout(torch.autograd.Function):
         (keep,) = ctx.saved_tensors
         grad = grad.contiguous()
         dx = torch.empty(grad.shape, dtype=ctx.x_dtype, device=grad.device)
-        n = grad.numel()
-        lora_dropout_bwd_kernel[(triton.cdiv(n, BACKWARD_BLOCK),)](
-            grad, keep, dx, n, ctx.scale, BLOCK=BACKWARD_BLOCK, num_warps=4)
+        # the draw and the index are not read in backward; keep stands in for their pointers
+        _launch(grad, keep, keep, keep, dx, ctx.scale, backward=True)
         return dx, None, None, None, None
 
 
