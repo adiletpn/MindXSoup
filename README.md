@@ -30,12 +30,16 @@
 | **14 345 → 505 MiB**<br>28.4× less | **86.1 → 58.4 s**<br>1.48× faster | **eval −0.003%**<br>same adapter | **10 / 10 PASS**<br>own kernels 14.8% |
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"xyChart": {"plotColorPalette": "#FF6B35", "backgroundColor": "transparent", "titleColor": "#FF6B35", "xAxisLabelColor": "#8B95A7", "yAxisLabelColor": "#8B95A7", "xAxisTitleColor": "#8B95A7", "yAxisTitleColor": "#8B95A7", "xAxisLineColor": "#8B95A7", "yAxisLineColor": "#8B95A7", "xAxisTickColor": "#8B95A7", "yAxisTickColor": "#8B95A7"}}}}%%
 xychart-beta
     title "Peak GPU memory, MiB: step by step"
     x-axis ["Base", "fp16 + fused CE + NF4", "No padding + recompute", "Weights on CPU", "Layer inputs on CPU", "Table on CPU at load"]
     y-axis "MiB" 0 --> 15000
     bar [14345, 6343, 1739, 1077, 673, 505]
 ```
+
+> [!TIP]
+> **The training now needs less GPU memory than the 4-bit model itself weighs** (~1.1 GB): weights and the vocabulary table live in pinned CPU memory and stream to the GPU one layer ahead.
 
 ---
 
