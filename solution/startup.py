@@ -140,6 +140,8 @@ def convert_dtype_on_gpu_at_load():
     both copies of the 445 MiB embedding."""
     from transformers import core_model_loading as loading
 
+    from . import head_stream
+
     original = loading._materialize_copy
     if getattr(original, "_mindx_patched", False):
         return
@@ -152,6 +154,10 @@ def convert_dtype_on_gpu_at_load():
         except (RuntimeError, TypeError):
             return original(tensor, device, dtype)
         source = tensor[...]  # reads the tensor from the safetensors file
+        if (head_stream.enabled and target.type == "cuda" and dtype == torch.float16
+                and source.dim() == 2 and source.shape[0] >= TABLE_MIN_ROWS
+                and source.dtype in _FLOATS):
+            return head_stream.table_at_load(source, target, dtype)  # the vocabulary table
         if (target.type == "cuda" and source.device.type == "cpu" and source.dtype != dtype
                 and source.dtype in _FLOATS and dtype in _FLOATS
                 and source.numel() * source.element_size() <= GPU_CONVERT_MAX_BYTES):
@@ -163,3 +169,4 @@ def convert_dtype_on_gpu_at_load():
 
 
 _FLOATS = (torch.bfloat16, torch.float16, torch.float32)
+TABLE_MIN_ROWS = 65536  # only the vocabulary table (151 936 rows) has this many

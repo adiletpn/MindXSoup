@@ -73,3 +73,39 @@ def test_offloaded_table_gives_the_same_model_outputs():
     with torch.no_grad():
         assert torch.equal(model.get_input_embeddings()(ids), embeds)
         assert torch.equal(model(input_ids=ids).logits, logits)
+
+
+def test_table_loaded_straight_to_the_host_gives_the_same_outputs():
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+
+    from solution import head_stream
+    from solution.embedding import shrink_embedding
+    from solution.head_stream import ensure_table, table_at_load, table_of
+
+    torch.manual_seed(0)
+    config = Qwen2Config(vocab_size=1000, hidden_size=64, intermediate_size=128,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=2,
+                         tie_word_embeddings=True)
+    model = Qwen2ForCausalLM(config).cuda()
+    for param in model.parameters():
+        param.requires_grad_(False)
+    table = model.get_input_embeddings().weight
+    table.data = table.data.half().float()
+    shrink_embedding(model)
+    ids = torch.randint(0, 1000, (2, 17), device="cuda")
+    with torch.no_grad():
+        logits = model(input_ids=ids).logits
+    checkpoint = table.detach().cpu().to(torch.bfloat16).float()  # any source dtype
+    want_host = checkpoint.to(torch.float16)
+    table.data = table_at_load(checkpoint, table.device, torch.float16)
+    assert table.untyped_storage().nbytes() <= 2
+    was = head_stream.enabled
+    head_stream.enabled = True
+    try:
+        ensure_table(model)
+    finally:
+        head_stream.enabled = was
+    assert table_of(table) is not None and torch.equal(table_of(table).host, want_host)
+    with torch.no_grad():
+        got = model(input_ids=ids).logits
+    assert got.shape == logits.shape and torch.isfinite(got).all()
