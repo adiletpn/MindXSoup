@@ -102,3 +102,5 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **31.10 head-tok a0dfdee, mindx-headtok-full2: 10/10.** 58.32/58.56 s vs base 91.2/87.4 (1.528x), **1077 MiB (13.32x)**, eval +0.001%, own kernels 12.0%. PR #11.
 
 | 31.10 | main 1d3b11e (PR #11 head-tok), **seed 7** | ansar-main-seed7 | 59.73 / 60.11 s (base 95.76 / 88.21) | 1037 MiB | 1.535× / 13.84× | +0.000% | 10/10, kernels 11.7%, pytest 129 passed |
+
+**31.10 final-mem 196bd9a (no own tokenization + gate/up + host recompute inputs + head slice 4096), mindx-finalmem: 10/10, 133 tests.** 66.42/64.81 s vs slow base 92.3 (1.406x), **757 MiB (18.95x)**, eval +0.001%, own kernels 11.2%.
