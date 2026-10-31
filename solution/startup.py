@@ -32,31 +32,6 @@ def cache_package_distributions():
     importlib.metadata.packages_distributions = packages_distributions
 
 
-def skip_in_memory_map_hashing():
-    """datasets hashes every map/filter transform (with dill, through the tokenizer it closes over)
-    only to name a cache file. A dataset built in memory (Soup's Dataset.from_list) has no cache
-    files and writes none, so the name is never used; datasets itself falls back to a random
-    fingerprint whenever hashing fails. Give such calls a random fingerprint up front, from
-    os.urandom so no random generator of the run moves. Rows, order and processing are unchanged."""
-    import os
-
-    from datasets import Dataset
-
-    for name in ("map", "filter"):
-        method = getattr(Dataset, name)
-        if getattr(method, "_mindx_patched", False):
-            continue
-
-        def wrapped(self, *args, _method=method, **kwargs):
-            if ("new_fingerprint" not in kwargs and not self.cache_files
-                    and kwargs.get("cache_file_name") is None
-                    and kwargs.get("num_proc") in (None, 0, 1)):
-                kwargs["new_fingerprint"] = os.urandom(8).hex()
-            return _method(self, *args, **kwargs)
-
-        wrapped._mindx_patched = True
-        wrapped.__name__, wrapped.__doc__ = method.__name__, method.__doc__
-        setattr(Dataset, name, wrapped)
 
 
 def skip_unused_optional_imports():
