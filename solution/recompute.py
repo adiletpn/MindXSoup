@@ -45,7 +45,10 @@ class Fp16InputCheckpoint(torch.autograd.Function):
     stored in fp16; the forward, the loss and the metrics are unchanged."""
 
     @staticmethod
-    def forward(ctx, hidden, run):
+    def forward(ctx, hidden, run, _anchor):
+        # _anchor: an empty tensor that requires grad, so autograd calls backward even when the
+        # layer input itself does not require grad (the first layer's input comes from the frozen
+        # embedding); the LoRA weights inside the layer are not inputs of this function
         ctx.run = run
         ctx.autocast = (torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"))
         ctx.rng = torch.cuda.get_rng_state(hidden.device)
@@ -67,7 +70,7 @@ class Fp16InputCheckpoint(torch.autograd.Function):
             with torch.enable_grad(), torch.autocast("cuda", dtype=dtype, enabled=enabled):
                 out = ctx.run(hidden)
             torch.autograd.backward(out, grad)
-        return hidden.grad, None
+        return (hidden.grad if ctx.needs_input_grad[0] else None), None, None
 
 
 def _backward_begins(layer):
@@ -124,7 +127,8 @@ def patch_qwen2_layer_recompute(fp16=False):
                 form["tuple"] = isinstance(out, tuple)
                 return out[0] if form["tuple"] else out
 
-            hidden = Fp16InputCheckpoint.apply(hidden_states, run_tensor)
+            anchor = torch.empty(0, device=hidden_states.device, requires_grad=True)
+            hidden = Fp16InputCheckpoint.apply(hidden_states, run_tensor, anchor)
             phase["forward"] = False
             return (hidden,) if form["tuple"] else hidden
         out = checkpoint(run, hidden_states, use_reentrant=False, preserve_rng_state=True)

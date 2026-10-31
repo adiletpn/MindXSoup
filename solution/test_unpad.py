@@ -123,6 +123,7 @@ def test_recompute_from_fp16_inputs_is_close(unpadded):
     got = step(model, unpadded, ids, mask, labels, recompute=True, fp16_inputs=True)
     layer_recompute.fp16_inputs = False
     torch.testing.assert_close(got[0], ref[0], rtol=0, atol=0)  # the forward is unchanged
+    assert all(g.abs().sum() > 0 for g in got[5].values())  # every LoRA weight got a gradient
     for name, grad in ref[5].items():  # gradients from fp16-rounded layer inputs: close
         scale = grad.abs().max()
         assert (got[5][name] - grad).abs().max() <= 5e-3 * scale, name
