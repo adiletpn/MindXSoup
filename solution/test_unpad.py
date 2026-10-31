@@ -65,10 +65,10 @@ def batch(left_padded=False):
     return ids, mask, labels
 
 
-def step(model, unpadded, ids, mask, labels, recompute=False, fp16_inputs=False):
+def step(model, unpadded, ids, mask, labels, recompute=False, fp16_inputs=False, host=False):
     from solution import fused_ce, recompute as layer_recompute, unpad
 
-    layer_recompute.patch_qwen2_layer_recompute(fp16=fp16_inputs)
+    layer_recompute.patch_qwen2_layer_recompute(fp16=fp16_inputs, host=host)
     layer_recompute.enabled = recompute
     layer_recompute.BUDGET_TOKENS = 0  # rerun every layer of the tiny batch
     unpad.enabled = unpadded
@@ -113,15 +113,16 @@ def test_recompute_alone_matches():
         torch.testing.assert_close(got[5][name], grad, rtol=1e-5, atol=1e-7, msg=name)
 
 
+@pytest.mark.parametrize("host", [False, True])
 @pytest.mark.parametrize("unpadded", [False, True])
-def test_recompute_from_fp16_inputs_is_close(unpadded):
+def test_recompute_from_fp16_inputs_is_close(unpadded, host):
     from solution import recompute as layer_recompute
 
     model = tiny_lora_qwen2(0.05)
     ids, mask, labels = batch()
     ref = step(model, unpadded, ids, mask, labels, recompute=True)
-    got = step(model, unpadded, ids, mask, labels, recompute=True, fp16_inputs=True)
-    layer_recompute.fp16_inputs = False
+    got = step(model, unpadded, ids, mask, labels, recompute=True, fp16_inputs=True, host=host)
+    layer_recompute.fp16_inputs = layer_recompute.host_inputs = False
     torch.testing.assert_close(got[0], ref[0], rtol=0, atol=0)  # the forward is unchanged
     assert all(g.abs().sum() > 0 for g in got[5].values())  # every LoRA weight got a gradient
     for name, grad in ref[5].items():  # gradients from fp16-rounded layer inputs: close

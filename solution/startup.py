@@ -34,54 +34,6 @@ def cache_package_distributions():
 
 
 
-def tokenize_sft_rows_without_map():
-    """Soup tokenizes the SFT rows with `Dataset.from_list(rows).map(checked_format_row, ...)`.
-    For a few hundred rows the map's own work is small, but `datasets` first hashes the function
-    with dill (to name a cache file an in-memory dataset never writes), and the function closes
-    over the tokenizer: about 2 s on Kaggle. Organizers (31.10 14:13): tokenizing the dataset with
-    our own code, same input_ids and labels, kept in memory, is allowed.
-
-    Here the same rows go through the same Arrow round trip (`Dataset.from_list(rows)`), Soup's
-    own `format_row` and target check run on each row in order with the same error message, and
-    the results are put back with `Dataset.from_list`. Only datasets whose single column is
-    "messages" (Soup's text SFT path) take this; anything else keeps Soup's function."""
-    try:
-        from soup_cli.trainer import sft
-    except ImportError:
-        return
-    original = getattr(sft, "_map_text_sft_rows", None)
-    if original is None or getattr(original, "_mindx_patched", False):
-        return
-
-    def _map_text_sft_rows(rows, *, format_row, split, max_length):
-        from datasets import Dataset
-
-        from soup_cli.data.loss_mask import NoCausalLossTargetError, ensure_causal_loss_target
-
-        source = Dataset.from_list(rows)
-        if source.column_names != ["messages"]:
-            return original(rows, format_row=format_row, split=split, max_length=max_length)
-        formatted_rows = []
-        for row_index, example in enumerate(source):
-            try:
-                formatted = format_row(example)
-                labels = formatted.get("labels")
-                if labels is not None:
-                    ensure_causal_loss_target(labels, max_length=max_length)
-            except NoCausalLossTargetError as exc:
-                raise ValueError(f"{split} row {row_index + 1}: {exc}") from exc
-            out = {k: v for k, v in example.items() if k != "messages"}
-            out.update(formatted)
-            formatted_rows.append(out)
-        if not formatted_rows:
-            return original(rows, format_row=format_row, split=split, max_length=max_length)
-        return Dataset.from_list(formatted_rows)
-
-    _map_text_sft_rows._mindx_patched = True
-    _map_text_sft_rows.__doc__ = original.__doc__
-    sft._map_text_sft_rows = _map_text_sft_rows
-
-
 STACK_BYTES = 256
 _stack_pending = False
 
@@ -188,6 +140,8 @@ def convert_dtype_on_gpu_at_load():
     both copies of the 445 MiB embedding."""
     from transformers import core_model_loading as loading
 
+    from . import head_stream
+
     original = loading._materialize_copy
     if getattr(original, "_mindx_patched", False):
         return
@@ -200,6 +154,10 @@ def convert_dtype_on_gpu_at_load():
         except (RuntimeError, TypeError):
             return original(tensor, device, dtype)
         source = tensor[...]  # reads the tensor from the safetensors file
+        if (head_stream.enabled and target.type == "cuda" and dtype == torch.float16
+                and source.dim() == 2 and source.shape[0] >= TABLE_MIN_ROWS
+                and source.dtype in _FLOATS):
+            return head_stream.table_at_load(source, target, dtype)  # the vocabulary table
         if (target.type == "cuda" and source.device.type == "cpu" and source.dtype != dtype
                 and source.dtype in _FLOATS and dtype in _FLOATS
                 and source.numel() * source.element_size() <= GPU_CONVERT_MAX_BYTES):
@@ -211,3 +169,4 @@ def convert_dtype_on_gpu_at_load():
 
 
 _FLOATS = (torch.bfloat16, torch.float16, torch.float32)
+TABLE_MIN_ROWS = 65536  # only the vocabulary table (151 936 rows) has this many

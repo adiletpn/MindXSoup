@@ -12,14 +12,14 @@ from .embedding import patch_fp16_embedding
 from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
 from .linear4bit import patch_bnb_linear4bit
 from .mlp import patch_qwen2_mlp_fp16
+from .mlp_recompute import patch_qwen2_mlp_gateup_recompute
 from .nf4 import patch_bnb_nf4
 from .recompute import patch_qwen2_layer_recompute
 from .rmsnorm import patch_qwen2_rmsnorm
 from .rope import patch_rope
 from .startup import (cache_package_distributions, convert_dtype_on_gpu_at_load,
                       import_bitsandbytes_without_compile_wrappers,
-                      shrink_cuda_stack, skip_unused_optional_imports,
-                      tokenize_sft_rows_without_map)
+                      shrink_cuda_stack, skip_unused_optional_imports)
 from .head_stream import patch_head_stream
 from .stream import patch_stream_layers
 from .swiglu import patch_qwen2_mlp
@@ -29,6 +29,7 @@ FEATURES = {
     "startup_cache": True,   # CPU startup: no unused compile wrappers/sklearn/wandb, one metadata scan
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
     "mlp_fp16": True,        # MLP keeps fp16 activations (uses the example's SwiGLU kernel)
+    "mlp_gateup_recompute": True,  # layers not rerun keep the MLP input, redo gate/up in backward
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
@@ -40,6 +41,7 @@ FEATURES = {
     "unpad": True,           # pad tokens never enter the decoder; attention per row
     "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
     "recompute_fp16_inputs": True,  # rerun layers keep their input as scaled fp16 rows, not fp32
+    "recompute_host_inputs": True,  # ... and those fp16 rows wait for backward in pinned host memory
     "stream_weights": True,  # decoder 4-bit weights in pinned host memory, one layer on the GPU at a time
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
@@ -76,13 +78,14 @@ def apply():
     if FEATURES["startup_cache"]:
         cache_package_distributions()  # before trl, imported further down
         skip_unused_optional_imports()  # before the patches below import transformers' models
-        tokenize_sft_rows_without_map()
         shrink_cuda_stack()  # takes effect on the first training step (fused_ce.py)
         convert_dtype_on_gpu_at_load()
     if FEATURES["example_swiglu"]:
         patch_qwen2_mlp()
     if FEATURES["mlp_fp16"]:
         patch_qwen2_mlp_fp16()
+        if FEATURES["mlp_gateup_recompute"]:
+            patch_qwen2_mlp_gateup_recompute()  # wraps the fp16 forward above
     if FEATURES["rmsnorm"]:
         patch_qwen2_rmsnorm()
     if FEATURES["fused_ce"]:
@@ -99,7 +102,8 @@ def apply():
     if FEATURES["unpad"]:
         patch_unpad()  # used by the fused head's forward
     if FEATURES["recompute"]:
-        patch_qwen2_layer_recompute(fp16=FEATURES["recompute_fp16_inputs"])
+        patch_qwen2_layer_recompute(fp16=FEATURES["recompute_fp16_inputs"],
+                                    host=FEATURES["recompute_host_inputs"])
     if FEATURES["stream_weights"] and FEATURES["nf4"] and FEATURES["nf4_direct"]:
         patch_stream_layers()  # set up by the fused head's forward, before the first step
     if FEATURES["fp16_embedding"]:

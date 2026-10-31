@@ -199,6 +199,8 @@ def patch_qwen2_causal_lm():
                 past_key_values=None, inputs_embeds=None, labels=None, use_cache=None,
                 logits_to_keep=0, **kwargs):
         warmup.wait()  # kernels compiled in the background while the model loaded
+        if isinstance(self, torch.nn.Module):
+            head_stream.ensure_table(self)  # a table loaded straight to the host (startup.py)
         if self.training and isinstance(self, torch.nn.Module):
             stream.setup(self)  # decoder weights to the host, once (stream.py)
             if head_stream.enabled:

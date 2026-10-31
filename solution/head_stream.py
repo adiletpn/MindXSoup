@@ -22,11 +22,12 @@ import torch
 import triton
 import triton.language as tl
 
-SLICE = 8192   # vocabulary rows per slice: 8192 x 1536 fp16 = 24 MiB per buffer
+SLICE = 4096   # vocabulary rows per slice: 4096 x 1536 fp16 = 12 MiB per buffer
 BLOCK = 4096   # = fused_ce.VOCAB_BLOCK; SLICE is a multiple, so the block boundaries agree
 ONE_WALK = True  # gradient accumulated in the same walk (FlashAttention-style rescaling)
 
 enabled = False  # set by patch_head_stream()
+_hosts_at_load = {}  # GPU placeholder storage pointer -> the table's pinned host copy
 
 
 @triton.jit
@@ -161,6 +162,37 @@ class HostTable:
         return self.host.to(self.device)
 
 
+def table_at_load(source, device, dtype):
+    """While transformers loads the checkpoint: put the table straight into pinned host memory and
+    give the model a 1-element GPU placeholder of its shape, so the 445 MiB never sit on the GPU
+    (the nvidia-smi peak covers loading). offload_table() picks the host copy up later. The values
+    are the ones `source.to(device, dtype)` would give: the same conversion, on the CPU."""
+    host = torch.empty(source.shape, dtype=dtype, pin_memory=True)
+    host.copy_(source.to(dtype))
+    placeholder = torch.empty((1, 1), dtype=dtype, device=device).expand(source.shape)
+    _hosts_at_load[placeholder.untyped_storage().data_ptr()] = host
+    return placeholder
+
+
+def pending_at_load(weight):
+    return weight.untyped_storage().data_ptr() in _hosts_at_load
+
+
+def ensure_table(causal_lm):
+    """Before any forward reads a table that was loaded straight to the host: hand it to
+    offload_table(), or, where that does not apply, put the real weight back on the GPU."""
+    from .embedding import _tied_parts
+
+    parts = _tied_parts(causal_lm)
+    if parts is None or not pending_at_load(parts[0].weight):
+        return
+    if enabled and offload_table(causal_lm):
+        return
+    weight = parts[0].weight
+    host = _hosts_at_load.pop(weight.untyped_storage().data_ptr())
+    weight.data = host.to(weight.device)
+
+
 def table_of(weight):
     return getattr(weight, "_mindx_table", None)
 
@@ -229,11 +261,13 @@ def offload_table(causal_lm):
     if not (weight.is_cuda and weight.dtype == torch.float16 and not weight.requires_grad
             and weight.dim() == 2 and embedding.max_norm is None and head.bias is None):
         return False
-    host = torch.empty(weight.shape, dtype=weight.dtype, pin_memory=True)
-    host.copy_(weight.data)
+    host = _hosts_at_load.pop(weight.untyped_storage().data_ptr(), None)
+    if host is None:
+        host = torch.empty(weight.shape, dtype=weight.dtype, pin_memory=True)
+        host.copy_(weight.data)
+        weight.data = torch.empty((1, 1), dtype=weight.dtype, device=weight.device).expand(
+            weight.shape)
     table = HostTable(host, weight.device)
-    weight.data = torch.empty((1, 1), dtype=weight.dtype, device=weight.device).expand(
-        weight.shape)
     weight._mindx_table = table
 
     def embed_forward(input_ids, _module=embedding):
