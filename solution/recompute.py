@@ -120,8 +120,12 @@ class ActivationStash:
 
     def pack(self, layer):
         def pack_hook(tensor):
-            if not tensor.is_cuda or tensor.numel() * tensor.element_size() < OFFLOAD_MIN_BYTES \
-                    or isinstance(tensor, torch.nn.Parameter):
+            nbytes = tensor.numel() * tensor.element_size()
+            # only tensors that own their whole block: a view into a shared buffer (q/k/v of one
+            # projection, gate|up) may be read through the buffer's address by our kernels
+            if not tensor.is_cuda or nbytes < OFFLOAD_MIN_BYTES or isinstance(tensor, torch.nn.Parameter) \
+                    or not tensor.is_contiguous() or tensor.storage_offset() != 0 \
+                    or tensor.untyped_storage().nbytes() != nbytes:
                 return tensor
             item = _Stashed()
             item.device, item.gpu, item.ready = tensor.device, None, None
