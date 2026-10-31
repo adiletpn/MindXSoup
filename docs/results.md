@@ -90,3 +90,5 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 - Submission notebook: prepared locally from templates/kaggle_notebook.ipynb with team REPO_URL and empty COMMIT. Public Save & Run All is PENDING: Computer Use native pipe unavailable and a repository-scoped Kaggle GITHUB_TOKEN secret is not yet configured. No public notebook link or official checks claimed. User needs to import the prepared notebook and resolve repository secret access with the captain if fine-grained organization access is unavailable.
 
 | 31.10 | stream 914d188 (budget 512, backward prefetch hints, one-kernel dropout) | mindx-b512-full | 50.88 / 50.67 s | 2067 MiB | 1.613× / 6.94× | -0.001% | 10/10, kernels 13.4% |
+
+**31.10 int8 backward dX bench (T4, tools/bench_int8.py, mindx-int8-bench).** _int_mm vs fp16 at M=1168: q/o x1.35, k/v x1.12, gate/up x1.27, down x1.55; at M=2048 down x0.95. With ideal fused quantize/rescale passes (memory bound): net x0.70–1.26, about 0.7 ms per layer per step, ≈ 1 s per run at best. Not taken: too little for the accuracy change and the new code.
