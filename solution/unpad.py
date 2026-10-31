@@ -85,10 +85,11 @@ def patch_sdpa_per_row():
             groups = query.shape[1] // key.shape[1]
             key, value = (x[:, :, None].expand(-1, -1, groups, -1, -1).reshape(
                 x.shape[0], -1, x.shape[2], x.shape[3]) for x in (key, value))
-        outputs, start = [], 0
-        for n in rows[0]:
-            stop = start + n
-            q, k, v = query[:, :, start:stop], key[:, :, start:stop], value[:, :, start:stop]
+        # split, not slicing: backward of a split is one cat; each slice's backward would be a
+        # zero-filled full-size gradient plus an add, 3 tensors x rows x layers launches per step
+        outputs = []
+        parts = [x.split(list(rows[0]), dim=2) for x in (query, key, value)]
+        for n, q, k, v in zip(rows[0], *parts):
             if direct:  # what sdpa_attention_forward runs for a mask-free causal row
                 out = torch.nn.functional.scaled_dot_product_attention(
                     q, k, v, dropout_p=kwargs.get("dropout", 0.0), scale=kwargs.get("scaling"),
@@ -96,7 +97,6 @@ def patch_sdpa_per_row():
             else:
                 out, _ = original(module, q, k, v, None, **kwargs)
             outputs.append(out)  # [1, n, heads, head_dim]
-            start = stop
         return torch.cat(outputs, dim=1), None
 
     sdpa_per_row._mindx_patched = True
