@@ -12,6 +12,7 @@ from .embedding import patch_fp16_embedding
 from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
 from .linear4bit import patch_bnb_linear4bit
 from .mlp import patch_qwen2_mlp_fp16
+from .mlp_recompute import patch_qwen2_mlp_gateup_recompute
 from .nf4 import patch_bnb_nf4
 from .recompute import patch_qwen2_layer_recompute
 from .rmsnorm import patch_qwen2_rmsnorm
@@ -28,6 +29,7 @@ FEATURES = {
     "startup_cache": True,   # CPU startup: no unused compile wrappers/sklearn/wandb, one metadata scan
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
     "mlp_fp16": True,        # MLP keeps fp16 activations (uses the example's SwiGLU kernel)
+    "mlp_gateup_recompute": True,  # layers not rerun keep the MLP input, redo gate/up in backward
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
@@ -82,6 +84,8 @@ def apply():
         patch_qwen2_mlp()
     if FEATURES["mlp_fp16"]:
         patch_qwen2_mlp_fp16()
+        if FEATURES["mlp_gateup_recompute"]:
+            patch_qwen2_mlp_gateup_recompute()  # wraps the fp16 forward above
     if FEATURES["rmsnorm"]:
         patch_qwen2_rmsnorm()
     if FEATURES["fused_ce"]:
