@@ -22,30 +22,6 @@ def test_cached_mapping_matches_and_is_a_copy():
         importlib.metadata.packages_distributions = real
 
 
-def test_in_memory_map_gives_the_same_rows_and_leaves_random_alone():
-    import random
-
-    import pytest
-
-    datasets = pytest.importorskip("datasets")
-    import numpy as np
-    import torch
-
-    from solution.startup import skip_in_memory_map_hashing
-
-    rows = [{"text": f"row {i}", "n": i} for i in range(50)]
-    ref = datasets.Dataset.from_list(rows).map(lambda r: {"n2": r["n"] * 2}).filter(
-        lambda r: r["n"] % 3 != 0)
-    skip_in_memory_map_hashing()
-    states = random.getstate(), np.random.get_state()[1].copy(), torch.get_rng_state()
-    got = datasets.Dataset.from_list(rows).map(lambda r: {"n2": r["n"] * 2}).filter(
-        lambda r: r["n"] % 3 != 0)
-    assert got.to_list() == ref.to_list()
-    assert random.getstate() == states[0]
-    assert (np.random.get_state()[1] == states[1]).all()
-    assert torch.equal(torch.get_rng_state(), states[2])
-
-
 def test_optional_import_checks_are_restored():
     import transformers
     import transformers.utils as transformers_utils

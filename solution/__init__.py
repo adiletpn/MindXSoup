@@ -17,14 +17,14 @@ from .recompute import patch_qwen2_layer_recompute
 from .rmsnorm import patch_qwen2_rmsnorm
 from .rope import patch_rope
 from .startup import (cache_package_distributions, convert_dtype_on_gpu_at_load,
-                      import_bitsandbytes_without_compile_wrappers, skip_in_memory_map_hashing,
+                      import_bitsandbytes_without_compile_wrappers,
                       skip_unused_optional_imports)
 from .stream import patch_stream_layers
 from .swiglu import patch_qwen2_mlp
 from .unpad import patch_unpad
 
 FEATURES = {
-    "startup_cache": True,   # CPU startup: no unused compile wrappers/sklearn/wandb, no dill hashing, one metadata scan
+    "startup_cache": True,   # CPU startup: no unused compile wrappers/sklearn/wandb, one metadata scan
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
     "mlp_fp16": True,        # MLP keeps fp16 activations (uses the example's SwiGLU kernel)
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
@@ -70,7 +70,6 @@ def apply():
         warmup.start(_warmup_jobs())
     if FEATURES["startup_cache"]:
         cache_package_distributions()  # before trl, imported further down
-        skip_in_memory_map_hashing()
         skip_unused_optional_imports()  # before the patches below import transformers' models
         convert_dtype_on_gpu_at_load()
     if FEATURES["example_swiglu"]:
