@@ -53,9 +53,9 @@ def compile_head_stream():
     target = torch.zeros(1, dtype=torch.int32, device="cuda")
     state = [torch.zeros(1, device="cuda") for _ in range(4)]
     state.insert(4, torch.zeros(1, dtype=torch.int32, device="cuda"))
-    state += [torch.zeros(1, device="cuda") for _ in range(2)]
-    for grad in (False, True):  # stats walk, then gradient walk
-        launch_slice(logits, target, state, 0, 1.0, grad)
+    state += [torch.zeros(1, device="cuda") for _ in range(3)]
+    for grad, acc in ((False, True), (False, False), (True, False)):  # one walk; two walks
+        launch_slice(logits, target, state, 0, 1.0, grad, acc)
 
 
 def compile_head_ce():

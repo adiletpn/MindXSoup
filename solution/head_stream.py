@@ -24,17 +24,20 @@ import triton.language as tl
 
 SLICE = 8192   # vocabulary rows per slice: 8192 x 1536 fp16 = 24 MiB per buffer
 BLOCK = 4096   # = fused_ce.VOCAB_BLOCK; SLICE is a multiple, so the block boundaries agree
+ONE_WALK = True  # gradient accumulated in the same walk (FlashAttention-style rescaling)
 
 enabled = False  # set by patch_head_stream()
 
 
 @triton.jit
 def head_slice_kernel(logits_ptr, target_ptr, m_ptr, s_ptr, t_ptr, best_ptr, best_idx_ptr,
-                      x_target_ptr, lse_ptr, n_cols, col0, grad_scale,
-                      GRAD: tl.constexpr, BLOCK: tl.constexpr):
+                      x_target_ptr, lse_ptr, alpha_ptr, n_cols, col0, grad_scale,
+                      GRAD: tl.constexpr, ACC: tl.constexpr, BLOCK: tl.constexpr):
     # One program per token row; logits: [rows, n_cols] fp16, the vocabulary columns
     # col0 .. col0 + n_cols. Without GRAD the row's online-softmax state is advanced over the
-    # slice; with GRAD the slice is overwritten with (softmax - onehot) * grad_scale.
+    # slice; with GRAD the slice is overwritten with (softmax - onehot) * grad_scale. With ACC
+    # (one walk), after the state update the slice is overwritten with exp(x - m), m the row's
+    # running max after this slice, and alpha = exp(m_before - m) rescales what was accumulated.
     row = tl.program_id(0)
     row_ptr = logits_ptr + row.to(tl.int64) * n_cols
     target = tl.load(target_ptr + row)
@@ -51,6 +54,7 @@ def head_slice_kernel(logits_ptr, target_ptr, m_ptr, s_ptr, t_ptr, best_ptr, bes
             tl.store(row_ptr + idx, g.to(logits_ptr.dtype.element_ty), mask=valid)
     else:
         m = tl.load(m_ptr + row)
+        m_before = m
         s = tl.load(s_ptr + row)
         t = tl.load(t_ptr + row)
         best = tl.load(best_ptr + row)
@@ -78,13 +82,21 @@ def head_slice_kernel(logits_ptr, target_ptr, m_ptr, s_ptr, t_ptr, best_ptr, bes
         safe = tl.where(here, target - col0, 0)
         x_target = tl.load(row_ptr + safe).to(tl.float32)
         tl.store(x_target_ptr + row, x_target, mask=here)
+        if ACC:
+            tl.store(alpha_ptr + row, tl.exp(m_before - m))
+            for start in range(0, n_cols, BLOCK):
+                idx = start + cols
+                valid = idx < n_cols
+                x = tl.load(row_ptr + idx, mask=valid, other=-float("inf")).to(tl.float32)
+                p = tl.where(valid & labelled, tl.exp(x - m), 0.0)
+                tl.store(row_ptr + idx, p.to(logits_ptr.dtype.element_ty), mask=valid)
 
 
-def launch_slice(logits, target, state, col0, grad_scale, grad):
-    m, s, t, best, best_idx, x_target, lse = state
+def launch_slice(logits, target, state, col0, grad_scale, grad, acc=False):
+    m, s, t, best, best_idx, x_target, lse, alpha = state
     head_slice_kernel[(logits.shape[0],)](
-        logits, target, m, s, t, best, best_idx, x_target, lse, logits.shape[1], col0,
-        grad_scale, GRAD=grad, BLOCK=BLOCK, num_warps=8)
+        logits, target, m, s, t, best, best_idx, x_target, lse, alpha, logits.shape[1], col0,
+        grad_scale, GRAD=grad, ACC=acc, BLOCK=BLOCK, num_warps=8)
 
 
 class HostTable:
@@ -165,22 +177,34 @@ def head_ce(flat, table, target, grad_scale, with_grad):
     x_target = torch.zeros(rows, dtype=torch.float32, device=dev)
     best_idx = torch.zeros(rows, dtype=torch.int32, device=dev)
     lse = torch.empty(rows, dtype=torch.float32, device=dev)
-    state = (m, s, t, best, best_idx, x_target, lse)
+    alpha = torch.empty(rows, dtype=torch.float32, device=dev)
+    state = (m, s, t, best, best_idx, x_target, lse, alpha)
     logits = torch.empty(rows * SLICE, dtype=torch.float16, device=dev)
 
     def contiguous_buffer(width):  # the kernel walks rows of exactly `width` columns
         return logits[:rows * width].view(rows, width)
 
+    one_walk = with_grad and ONE_WALK
+    acc = torch.zeros((rows, flat.shape[1]), dtype=torch.float32, device=dev) if one_walk \
+        else None
     for col0, w in table.slices():
         buf = contiguous_buffer(w.shape[0])
         torch.mm(flat, w.t(), out=buf)
-        launch_slice(buf, target, state, col0, grad_scale, grad=False)
+        launch_slice(buf, target, state, col0, grad_scale, grad=False, acc=one_walk)
+        if one_walk:  # buf now holds exp(x - m): accumulate sum_j exp(x_j - m) * W_j
+            acc.mul_(alpha.unsqueeze(1))
+            acc += torch.mm(buf, w).float()
     torch.add(m, torch.log(s), out=lse)
     entropy = lse - t / s
     labelled = target != -100
     token_loss = torch.where(labelled, lse - x_target, torch.zeros_like(lse))
     grad = None
-    if with_grad:
+    if one_walk:
+        # softmax @ W - W[target] for labelled rows, scaled like the two-walk gradient
+        target_rows = table.gather(torch.where(labelled, target, 0)).float()
+        grad = (acc / s.unsqueeze(1) - target_rows) * grad_scale
+        grad.mul_(labelled.unsqueeze(1))
+    elif with_grad:
         grad = torch.zeros((rows, flat.shape[1]), dtype=torch.float32, device=dev)
         for col0, w in table.slices():
             buf = contiguous_buffer(w.shape[0])
