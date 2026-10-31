@@ -47,7 +47,7 @@ class Fp16InputCheckpoint(torch.autograd.Function):
     @staticmethod
     def forward(ctx, hidden, run):
         ctx.run = run
-        ctx.autocast = (torch.is_autocast_enabled(), torch.get_autocast_gpu_dtype())
+        ctx.autocast = (torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"))
         ctx.rng = torch.cuda.get_rng_state(hidden.device)
         ctx.device = hidden.device
         with torch.no_grad():

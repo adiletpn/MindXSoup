@@ -112,6 +112,11 @@ class HostTable:
         starts = list(range(0, self.vocab, SLICE))
         ready = [None, None]
         free = [None, None]
+        # the buffers may still be read by work already enqueued (the previous walk): the first
+        # copies wait for everything the compute stream has so far
+        start = torch.cuda.Event()
+        start.record(compute)
+        self.copy_stream.wait_event(start)
 
         def issue(i):
             col0 = starts[i]
