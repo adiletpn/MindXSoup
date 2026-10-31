@@ -91,13 +91,14 @@ def patch_sdpa_per_row():
         parts = [x.split(list(rows[0]), dim=2) for x in (query, key, value)]
         for n, q, k, v in zip(rows[0], *parts):
             if direct:  # what sdpa_attention_forward runs for a mask-free causal row
-                out = torch.nn.functional.scaled_dot_product_attention(
+                outputs.append(torch.nn.functional.scaled_dot_product_attention(
                     q, k, v, dropout_p=kwargs.get("dropout", 0.0), scale=kwargs.get("scaling"),
-                    is_causal=n > 1).transpose(1, 2).contiguous()
+                    is_causal=n > 1))  # [1, heads, n, head_dim]
             else:
                 out, _ = original(module, q, k, v, None, **kwargs)
-            outputs.append(out)  # [1, n, heads, head_dim]
-        return torch.cat(outputs, dim=1), None
+                outputs.append(out.transpose(1, 2))  # [1, n, heads, head_dim] -> heads first
+        # one cat along the tokens and one transpose copy for all rows, not one copy per row
+        return torch.cat(outputs, dim=2).transpose(1, 2).contiguous(), None
 
     sdpa_per_row._mindx_patched = True
     ALL_ATTENTION_FUNCTIONS["sdpa"] = sdpa_per_row
