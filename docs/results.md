@@ -116,4 +116,6 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 
 **31.10 final-500 73402c2, seed 7 (Dilya, aqniet/dilya-f500-s7): 10/10, 135 tests.** 62.62/64.58 s vs base 79.77/85.69 (1.301x), **507 MiB (28.31x)**, eval +0.001% (2.05115 / 2.05117), own kernels 12.1%.
 
+**31.10 23:00 public Kaggle notebook adiletzholdasbek/notebook659c3b6e49, COMMIT d0ef96f: ALL CHECKS PASSED.** base 86.13 s / 14 345 MiB, solution 58.37 s / 505 MiB, **1.476x**, memory 28.406x, eval −0.003%, own kernels 14.8%.
+
 **31.10 SwiGLU in-place A/B (branch swiglu-inplace c8b5a1f vs final-500, aqniet/dilya-swiglu-ab, one T4, alternating):** base 67.59/60.42 s, 505 MiB (torch 343.3); new 60.08/60.62 s, **485 MiB** (torch 329.1); eval 2.04964-2.04965 both; 142 tests passed. −20 MiB (−4%), time within noise. Not taken (below the 5% threshold, after the code freeze).

@@ -7,13 +7,14 @@ lives in `solution/` and is switched on by `solution.apply()`.
 
 | Kaggle T4, `harness/run_task.py --repeats 2` | Base Soup | MindX | Ratio |
 |---|---|---|---|
-| Time of `soup train` | 81.1 s | **60.4 s** | **1.34× faster** |
+| Time of `soup train` | 86.1 s | **58.4 s** | **1.48× faster** |
 | Peak GPU memory (nvidia-smi, whole run) | 14 345 MiB | **505 MiB** | **28.4× less** |
-| Eval loss on the public rows | 2.04964 | 2.04964 | **0.000%** |
+| Eval loss on the public rows | 2.0497 | 2.04964 | **−0.003%** |
 | Official checks (`harness/check_rules.py`) | | **10 / 10 PASS** | |
 
-Measured run of the final code (commit `73402c2`, 31.10 22:00; later commits change only documents).
-Our own Triton kernels take 13.1% of the training time (check 4 needs 5%).
+Latest run: the public Kaggle notebook on the final commit `d0ef96f` (31.10 23:00; same code as `73402c2`,
+later commits change only documents). Our own Triton kernels take 14.8% of the training time (check 4
+needs 5%). Across all runs of this code the speed-up is 1.30–1.48× and the peak 505–507 MiB.
 The eval loss stays within ±0.005% of the base on every seed we ran (1, 7, 1234). We traded speed
 for memory on purpose: the score is logarithmic in both ratios, and 1 077 → 505 MiB cost us about
 1.44× → 1.34×; with recomputation off the code runs about 6 s faster at 4.1 GB, see
@@ -149,11 +150,12 @@ The final commit `73402c2`, `harness/run_task.py --repeats 2`, each run on its o
 
 | Run | Base, s | MindX, s | Speed-up | Peak base → MindX, MiB | Memory | Eval loss base / MindX | Checks, tests |
 |---|---|---|---|---|---|---|---|
+| seed 1, public notebook (`notebook659c3b6e49`, `d0ef96f`) | 86.13 | **58.37** | **1.48×** | 14 345 → **505** | **28.4×** | 2.0497 / 2.04964 (−0.003%) | 10/10, own kernels 14.8% |
 | seed 1 (`mindx-final500b`) | 79.75 / 82.35 | **60.30 / 60.50** | **1.34×** | 14 345 → **505** | **28.4×** | 2.04964 / 2.04964 (0.000%) | 10/10, own kernels 13.1%, 135 tests |
 | seed 1, another machine (`dilya-f500`) | 92.49 / 85.56 | 64.05 / 63.70 | 1.39× | 14 345 → 505 | 28.4× | 2.04967 / 2.04965 (−0.001%) | 10/10, own kernels 12.9%, 135 tests |
 | seed 7 (`dilya-f500-s7`) | 79.77 / 85.69 | 62.62 / 64.58 | 1.30× | 14 351 → 507 | 28.3× | 2.05115 / 2.05117 (+0.001%) | 10/10, own kernels 12.1%, 135 tests |
 
-The same code gives 1.30–1.39× on different machines: the base itself took 79.8–92.5 s. The peak is
+The same code gives 1.30–1.48× on different machines: the base itself took 79.8–92.5 s. The peak is
 505–507 MiB in every run, and PyTorch's own peak is 343 MiB.
 
 ### How we got here
@@ -232,7 +234,7 @@ allocator's cache: 505 MiB in total.
   slower bus, or for very short batches whose compute is shorter than a layer's copy, the step
   waits for its weights.
 - **We chose memory over speed.** Every decoder layer reruns its forward in backward (budget 0):
-  the final run is 1.34–1.39× faster than the base, while our fastest configurations reached
+  the final code is 1.30–1.48× faster than the base, while our fastest configurations reached
   1.78× (49.3 s at 3.5 GB) and 48.6 s at 4.1 GB.
 - **Kaggle time varies by ±10%** between machines and sessions (the same base: 79.8–92.5 s), so the
   speed-up depends on the machine the jury gets; single changes were measured A/B on one machine.

@@ -24,7 +24,7 @@
 | `qkv_rope_kernel` | `solution/attention.py` | LoRA add and scaling, RoPE and the fp16 casts of q/k/v, forward and backward | 0.8% |
 | `head_slice_kernel` | `solution/head_stream.py` | online softmax / CE / entropy / argmax and the hidden-state gradient over vocabulary slices of the host table | 0.5% |
 | `head_ce_rows_kernel`, `rope_kernel` | `solution/fused_ce.py`, `solution/rope.py` | fallbacks (head with the table on the GPU; RoPE outside the fp16 attention path) | — |
-| **total** | | | **13.1%** in the final run (12.0–17.3% across runs) |
+| **total** | | | **14.8%** in the public notebook run (12.0–17.3% across runs) |
 
 Ideas taken from other work, with links (we wrote the code ourselves): Liger Kernel
 (arXiv:2410.10989), Cut Cross-Entropy (arXiv:2411.09009), RoFormer (arXiv:2104.09864), QLoRA
@@ -34,16 +34,16 @@ softmax (arXiv:1805.02867), ZeRO-Offload (arXiv:2101.06840). Details and
 the rule each technique relies on: README, "What we did" and "Within the rules".
 
 ## Results on Kaggle T4 (from `runs/result.json` and `runs/checks.json`)
-Final code, `harness/run_task.py --repeats 2` (commit `73402c2`, 31.10 22:00; the submitted
-commit differs only in documents). The notebook above re-runs it.
+Latest run: the public Kaggle notebook above on the submitted commit `d0ef96f` (31.10 23:00; same
+code as `73402c2`, later commits change only documents). Across all runs: 1.30–1.48×, 505–507 MiB.
 
 | | Base Soup | Ours | Ratio |
 |---|---|---|---|
-| Time of `soup train`, s | 81.1 | 60.4 | speedup 1.34× |
+| Time of `soup train`, s | 86.1 | 58.4 | speedup 1.48× |
 | Peak GPU memory, MiB | 14 345 | 505 | base/ours 28.4× |
-| Eval loss (public rows) | 2.04964 | 2.04964 | 0.000% vs base |
+| Eval loss (public rows) | 2.0497 | 2.04964 | −0.003% vs base |
 
-- [x] All 10 checks of `harness/check_rules.py` passed on the final code (`73402c2` = `d0ef96f`): seed 1 on two machines and seed 7
+- [x] All 10 checks of `harness/check_rules.py` passed on the final code (`73402c2` = `d0ef96f`): seed 1 on two machines, seed 7, and the public Kaggle notebook (1.48×, 505 MiB)
 - [x] README.md rewritten for our solution: what we did, how to run it, results, limits
 
 ## Presentation covers
