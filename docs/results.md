@@ -98,3 +98,5 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **31.10 head-offload (two walks, before the copy-stream fix), mindx-head-full:** 57.26/57.46 s, **1187 MiB (12.09x)**, but checks 5-7 FAIL: first step 0.01%, mean loss +5.3/6.0%, entropy 8.4%, eval +2.2%. Cause: a new walk over the vocabulary started copying into buffers the compute stream was still reading (fixed: the first copies wait for the compute stream). Not taken as is.
 
 **31.10 head-tok (one walk + tok + stack + fp16 inputs), mindx-headtok-full:** 37.8/37.9 s, 949 MiB, FAIL 5-7 (first step 0.01%, mean +4.6%, eval +3.9%): the fp16-input recompute had no tensor input requiring grad (the first layer input comes from the frozen embedding), so autograd skipped its backward. Fixed with an anchor input.
+
+**31.10 head-tok a0dfdee, mindx-headtok-full2: 10/10.** 58.32/58.56 s vs base 91.2/87.4 (1.528x), **1077 MiB (13.32x)**, eval +0.001%, own kernels 12.0%. PR #11.
