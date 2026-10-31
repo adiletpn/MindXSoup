@@ -41,10 +41,34 @@ FEATURES = {
 }
 
 
-def apply():
+def _warmup_jobs():
+    """Our kernels in the order a training step first launches them."""
     jobs = []
+    if FEATURES["rmsnorm"]:
+        jobs.append(warmup.compile_rmsnorm)
+    if FEATURES["nf4"]:
+        jobs.append(warmup.compile_nf4)
+    if FEATURES["unpad"]:
+        jobs.append(warmup.compile_lora_dropout)
+    if FEATURES["attention_fp16"]:
+        jobs.append(compile_qkv_rope)
+    elif FEATURES["rope"]:  # with the fp16 attention path, q/k are rotated by qkv_rope_kernel
+        jobs.append(warmup.compile_rope)
+    if FEATURES["example_swiglu"] or FEATURES["mlp_fp16"]:
+        jobs.append(warmup.compile_example_swiglu)
+    if FEATURES["fused_ce"]:
+        jobs.append(warmup.compile_head_ce)
+    return jobs
+
+
+def apply():
     if FEATURES["startup_cache"]:
         import_bitsandbytes_without_compile_wrappers()  # first: peft and trl import it too
+    # compile in the background from here on, while the rest of apply() imports and patches and
+    # Soup loads the model; wait() runs in the fused head's forward before the first step
+    if FEATURES["warmup"]:
+        warmup.start(_warmup_jobs())
+    if FEATURES["startup_cache"]:
         cache_package_distributions()  # before trl, imported further down
         skip_in_memory_map_hashing()
         skip_unused_optional_imports()  # before the patches below import transformers' models
@@ -53,35 +77,24 @@ def apply():
         patch_qwen2_mlp()
     if FEATURES["mlp_fp16"]:
         patch_qwen2_mlp_fp16()
-    if FEATURES["example_swiglu"] or FEATURES["mlp_fp16"]:
-        jobs.append(warmup.compile_example_swiglu)
     if FEATURES["rmsnorm"]:
         patch_qwen2_rmsnorm()
-        jobs.append(warmup.compile_rmsnorm)
     if FEATURES["fused_ce"]:
         patch_qwen2_causal_lm()
         patch_trl_metrics()
-        jobs.append(warmup.compile_head_ce)
     if FEATURES["nf4"]:
         patch_bnb_nf4()
-        jobs.append(warmup.compile_nf4)
         if FEATURES["nf4_direct"]:
             patch_bnb_linear4bit()
     if FEATURES["rope"]:
         patch_rope()
-        jobs.append(warmup.compile_rope)
     if FEATURES["attention_fp16"]:
         patch_qwen2_attention_fp16()
-        jobs.append(compile_qkv_rope)
     if FEATURES["unpad"]:
         patch_unpad()  # used by the fused head's forward
-        jobs.append(warmup.compile_lora_dropout)
     if FEATURES["recompute"]:
         patch_qwen2_layer_recompute()
     if FEATURES["stream_weights"] and FEATURES["nf4"] and FEATURES["nf4_direct"]:
         patch_stream_layers()  # set up by the fused head's forward, before the first step
     if FEATURES["fp16_embedding"]:
         patch_fp16_embedding()  # after fused_ce: wraps whichever forward is in place
-    # wait() runs in the fused head's forward; without it the thread just finishes on its own
-    if FEATURES["warmup"]:
-        warmup.start(jobs)
