@@ -23,7 +23,7 @@ from torch.utils.checkpoint import checkpoint
 from . import stream, unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
-BUDGET_TOKENS = 0  # 0: every layer of every batch reruns (best score in our runs: 8.25x memory)
+BUDGET_TOKENS = 256  # map 31.10 (one T4, empty Triton cache): 0 -> 63 s / 1 209 MiB, 256 -> 55 s / 1 603 MiB, 512 -> 54 s / 2 067 MiB
 
 
 def layers_to_rerun(n_tokens, n_layers, budget=None):
