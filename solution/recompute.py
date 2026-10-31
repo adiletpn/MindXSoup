@@ -25,7 +25,7 @@ from . import stream, unpad
 enabled = False  # set by patch_qwen2_layer_recompute()
 fp16_inputs = False  # set by patch_qwen2_layer_recompute(fp16_inputs=True)
 host_inputs = False  # set by patch_qwen2_layer_recompute(host=True): fp16 inputs wait in pinned host memory
-BUDGET_TOKENS = 256  # map 31.10 (one T4, empty Triton cache): 0 -> 63 s / 1 209 MiB, 256 -> 55 s / 1 603 MiB, 512 -> 54 s / 2 067 MiB
+BUDGET_TOKENS = 0  # every layer reruns; 31.10 evening, one T4, host inputs: 0 -> 59.2 s / 675 MiB, 256 -> 58.3 s / 957 MiB
 
 
 def layers_to_rerun(n_tokens, n_layers, budget=None):
