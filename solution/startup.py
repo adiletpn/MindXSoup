@@ -34,6 +34,90 @@ def cache_package_distributions():
 
 
 
+def tokenize_sft_rows_without_map():
+    """Soup tokenizes the SFT rows with `Dataset.from_list(rows).map(checked_format_row, ...)`.
+    For a few hundred rows the map's own work is small, but `datasets` first hashes the function
+    with dill (to name a cache file an in-memory dataset never writes), and the function closes
+    over the tokenizer: about 2 s on Kaggle. Organizers (31.10 14:13): tokenizing the dataset with
+    our own code, same input_ids and labels, kept in memory, is allowed.
+
+    Here the same rows go through the same Arrow round trip (`Dataset.from_list(rows)`), Soup's
+    own `format_row` and target check run on each row in order with the same error message, and
+    the results are put back with `Dataset.from_list`. Only datasets whose single column is
+    "messages" (Soup's text SFT path) take this; anything else keeps Soup's function."""
+    try:
+        from soup_cli.trainer import sft
+    except ImportError:
+        return
+    original = getattr(sft, "_map_text_sft_rows", None)
+    if original is None or getattr(original, "_mindx_patched", False):
+        return
+
+    def _map_text_sft_rows(rows, *, format_row, split, max_length):
+        from datasets import Dataset
+
+        from soup_cli.data.loss_mask import NoCausalLossTargetError, ensure_causal_loss_target
+
+        source = Dataset.from_list(rows)
+        if source.column_names != ["messages"]:
+            return original(rows, format_row=format_row, split=split, max_length=max_length)
+        formatted_rows = []
+        for row_index, example in enumerate(source):
+            try:
+                formatted = format_row(example)
+                labels = formatted.get("labels")
+                if labels is not None:
+                    ensure_causal_loss_target(labels, max_length=max_length)
+            except NoCausalLossTargetError as exc:
+                raise ValueError(f"{split} row {row_index + 1}: {exc}") from exc
+            out = {k: v for k, v in example.items() if k != "messages"}
+            out.update(formatted)
+            formatted_rows.append(out)
+        if not formatted_rows:
+            return original(rows, format_row=format_row, split=split, max_length=max_length)
+        return Dataset.from_list(formatted_rows)
+
+    _map_text_sft_rows._mindx_patched = True
+    _map_text_sft_rows.__doc__ = original.__doc__
+    sft._map_text_sft_rows = _map_text_sft_rows
+
+
+STACK_BYTES = 256
+_stack_pending = False
+
+
+def shrink_cuda_stack():
+    """Ask for the CUDA stack reservation to shrink on the first training step.
+
+    The context reserves stack memory for every thread the GPU can hold: the default 1 KiB per
+    thread is about 40 MiB on a T4, counted in nvidia-smi's peak. None of the run's kernels needs
+    more than a few hundred bytes, and the driver raises the limit by itself for a kernel that
+    needs more, so correctness never depends on it. Organizers (31.10 08:50): allowed."""
+    global _stack_pending
+    _stack_pending = True
+
+
+def apply_cuda_stack_limit():
+    """cudaDeviceSetLimit(cudaLimitStackSize, STACK_BYTES) once, from the first training step
+    (the CUDA context exists by then); silently nothing where the runtime is not found."""
+    global _stack_pending
+    if not _stack_pending or not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return
+    _stack_pending = False
+    import ctypes
+
+    for name in ("libcudart.so.12", "libcudart.so", "libcudart.so.13"):
+        try:
+            runtime = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    else:
+        return
+    torch.cuda.synchronize()
+    runtime.cudaDeviceSetLimit(ctypes.c_int(0), ctypes.c_size_t(STACK_BYTES))  # 0: stack size
+
+
 def skip_unused_optional_imports():
     """Two optional packages the run imports but never uses (organizers: allowed, 30.10 21:09):
 

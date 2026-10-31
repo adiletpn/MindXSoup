@@ -46,6 +46,18 @@ def compile_rope():
     torch.autograd.backward((q_out, k_out), (torch.zeros_like(q_out), torch.zeros_like(k_out)))
 
 
+def compile_head_stream():
+    from .head_stream import SLICE, launch_slice
+
+    logits = torch.zeros(1, SLICE, dtype=torch.float16, device="cuda")
+    target = torch.zeros(1, dtype=torch.int32, device="cuda")
+    state = [torch.zeros(1, device="cuda") for _ in range(4)]
+    state.insert(4, torch.zeros(1, dtype=torch.int32, device="cuda"))
+    state += [torch.zeros(1, device="cuda") for _ in range(3)]
+    for grad, acc in ((False, True), (False, False), (True, False)):  # one walk; two walks
+        launch_slice(logits, target, state, 0, 1.0, grad, acc)
+
+
 def compile_head_ce():
     from .fused_ce import launch_rows
 
