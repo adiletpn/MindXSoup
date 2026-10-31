@@ -25,7 +25,7 @@ import torch
 import triton
 import triton.language as tl
 
-from . import head_stream, stream, unpad, warmup
+from . import head_stream, startup, stream, unpad, warmup
 
 IGNORE_INDEX = -100
 CHUNK = 256          # rows per head matmul: 256 x 151936 fp16 logits = 78 MB
@@ -203,6 +203,7 @@ def patch_qwen2_causal_lm():
             stream.setup(self)  # decoder weights to the host, once (stream.py)
             if head_stream.enabled:
                 head_stream.offload_table(self)  # embedding / head table to the host, once
+            startup.apply_cuda_stack_limit()  # once, if asked for (startup.py)
             unpad.tag_lora_dropouts(self)
         keep_all = logits_to_keep is None or (isinstance(logits_to_keep, int)
                                               and logits_to_keep == 0)

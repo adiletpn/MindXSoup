@@ -66,3 +66,32 @@ def test_gpu_dtype_conversion_is_bit_identical():
     nan = torch.isnan(cpu)
     assert torch.equal(nan, torch.isnan(gpu))
     assert torch.equal(cpu[~nan].view(torch.int16), gpu[~nan].view(torch.int16))
+
+
+def test_sft_rows_tokenized_without_map_match_soup():
+    import pytest
+
+    pytest.importorskip("datasets")
+    sft = pytest.importorskip("soup_cli.trainer.sft")
+    original = sft._map_text_sft_rows
+    from solution.startup import tokenize_sft_rows_without_map
+
+    tokenize_sft_rows_without_map()
+    patched = sft._map_text_sft_rows
+    if patched is original:
+        pytest.skip("Soup's function was already patched in this process")
+    original = getattr(original, "__wrapped__", original)
+
+    def format_row(example):
+        text = " ".join(m["content"] for m in example["messages"])
+        ids = [len(w) + 3 for w in text.split()]
+        return {"input_ids": ids, "labels": [-100] + ids[1:], "attention_mask": [1] * len(ids)}
+
+    rows = [{"messages": [{"role": "user", "content": f"q {i} " * (i % 5 + 1)},
+                          {"role": "assistant", "content": f"answer {i} " * (i % 7 + 2)}]}
+            for i in range(40)]
+    want = original(rows, format_row=format_row, split="train", max_length=512)
+    got = patched(rows, format_row=format_row, split="train", max_length=512)
+    assert got.column_names == want.column_names
+    assert got.features == want.features
+    assert got.to_list() == want.to_list()
