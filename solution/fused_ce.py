@@ -25,10 +25,10 @@ import torch
 import triton
 import triton.language as tl
 
-from . import unpad, warmup
+from . import stream, unpad, warmup
 
 IGNORE_INDEX = -100
-CHUNK = 1024         # larger row tiles reduce head GEMM launches; ~297 MiB fp16 workspace
+CHUNK = 256          # rows per head matmul: 256 x 151936 fp16 logits = 78 MB
 VOCAB_BLOCK = 4096
 # The gradient is written into the fp16 logits buffer scaled by GRAD_SCALE so that small
 # probabilities stay representable; it is divided out in fp32 after the matmul.
@@ -192,6 +192,9 @@ def patch_qwen2_causal_lm():
                 past_key_values=None, inputs_embeds=None, labels=None, use_cache=None,
                 logits_to_keep=0, **kwargs):
         warmup.wait()  # kernels compiled in the background while the model loaded
+        if self.training and isinstance(self, torch.nn.Module):
+            stream.setup(self)  # decoder weights to the host, once (stream.py)
+            unpad.tag_lora_dropouts(self)
         keep_all = logits_to_keep is None or (isinstance(logits_to_keep, int)
                                               and logits_to_keep == 0)
         if labels is None or not self.training or not keep_all or "shift_labels" in kwargs \

@@ -70,6 +70,18 @@ def compile_nf4():
                absmax_8bit=absmax_8bit, code=code, offset=offset)
 
 
+def compile_lora_dropout():
+    from .dropout import PackedDropout
+
+    tokens = 16
+    x = torch.zeros(1, tokens, HIDDEN, device="cuda", requires_grad=True)
+    drawn = torch.ones(1, tokens, HIDDEN, device="cuda")
+    index = torch.arange(tokens, device="cuda")
+    # training: fp32 input, fp16 output for lora_A, fp16 gradient back
+    out = PackedDropout.apply(x, drawn, index, 1.0 / 0.95, torch.float16)
+    out.backward(torch.zeros(1, tokens, HIDDEN, dtype=torch.float16, device="cuda"))
+
+
 def compile_example_swiglu():
     from .swiglu import swiglu
 

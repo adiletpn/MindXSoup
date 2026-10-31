@@ -20,10 +20,10 @@ import math
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from . import unpad
+from . import stream, unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
-BUDGET_TOKENS = 1024  # activations kept as for this many tokens through every layer
+BUDGET_TOKENS = 256  # map 31.10 (one T4, empty Triton cache): 0 -> 63 s / 1 209 MiB, 256 -> 55 s / 1 603 MiB, 512 -> 54 s / 2 067 MiB
 
 
 def layers_to_rerun(n_tokens, n_layers, budget=None):
@@ -52,16 +52,23 @@ def patch_qwen2_layer_recompute():
             getattr(getattr(attn, "config", None), "num_hidden_layers", None)
         if layer is None or n_layers is None or \
                 layer >= layers_to_rerun(hidden_states.shape[0] * hidden_states.shape[1], n_layers):
+            if layer is not None and stream.active():
+                stream.streamer().layer_begins(layer, forward=True)
             return original(self, hidden_states, *args, **kwargs)
         rows = unpad._rows
+        phase = {"forward": True}  # the first call of run is the forward, later ones recompute
 
         def run(hidden):
+            if stream.active():
+                stream.streamer().layer_begins(layer, forward=phase["forward"])
             if rows is None:
                 return original(self, hidden, *args, **kwargs)
             with unpad.packed(*rows):
                 return original(self, hidden, *args, **kwargs)
 
-        return checkpoint(run, hidden_states, use_reentrant=False, preserve_rng_state=True)
+        out = checkpoint(run, hidden_states, use_reentrant=False, preserve_rng_state=True)
+        phase["forward"] = False
+        return out
 
     cls.forward = forward
     cls._mindx_recompute = True

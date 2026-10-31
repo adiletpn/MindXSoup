@@ -21,6 +21,8 @@ import contextlib
 
 import torch
 
+from . import dropout
+
 enabled = False  # set by patch_unpad()
 _rows = None  # (row lengths, batch, padded length, real-token index) during a packed forward
 
@@ -101,19 +103,18 @@ def patch_sdpa_per_row():
     ALL_ATTENTION_FUNCTIONS["sdpa"] = sdpa_per_row
 
 
-class _KeepMask(torch.autograd.Function):
-    """x * scale where kept, 0 elsewhere; what torch's dropout computes for a given mask."""
-
-    @staticmethod
-    def forward(ctx, x, keep, scale):
-        ctx.save_for_backward(keep)
-        ctx.scale = scale
-        return (x * scale).masked_fill_(~keep, 0.0)
-
-    @staticmethod
-    def backward(ctx, grad):
-        (keep,) = ctx.saved_tensors
-        return (grad * ctx.scale).masked_fill_(~keep, 0.0), None, None
+def tag_lora_dropouts(model):
+    """Mark peft's LoRA dropout modules once: their output feeds lora_A, which under fp16 autocast
+    casts it to fp16 first, so our kernel can write fp16 directly."""
+    if getattr(model, "_mindx_lora_tagged", False):
+        return
+    for module in model.modules():
+        dropouts = getattr(module, "lora_dropout", None)
+        if isinstance(dropouts, torch.nn.ModuleDict):
+            for drop in dropouts.values():
+                if isinstance(drop, torch.nn.Dropout):
+                    drop._mindx_lora = True
+    model._mindx_lora_tagged = True
 
 
 def patch_dropout_full_mask():
@@ -130,11 +131,12 @@ def patch_dropout_full_mask():
             return original(self, x)
         lengths, batch, length, index = rows
         # the base drops on the padded [B, T, hidden] input: draw the same numbers, keep our rows
-        full = torch.nn.functional.dropout(
-            torch.ones(batch, length, x.shape[2], dtype=x.dtype, device=x.device), self.p, True)
-        keep = full.view(batch * length, -1)[index] != 0
-        del full
-        return _KeepMask.apply(x, keep.unsqueeze(0), 1.0 / (1.0 - self.p))
+        out_dtype = x.dtype
+        if getattr(self, "_mindx_lora", False) and x.dtype == torch.float32 \
+                and torch.is_autocast_enabled("cuda") \
+                and torch.get_autocast_dtype("cuda") == torch.float16:
+            out_dtype = torch.float16  # the cast lora_A's autocast would do next
+        return dropout.packed_dropout(x, self.p, batch, length, index, out_dtype)
 
     cls.forward = forward
     cls._mindx_patched = True
