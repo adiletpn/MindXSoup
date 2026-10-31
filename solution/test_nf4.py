@@ -63,3 +63,41 @@ def test_patched_matmul_matches_unpatched():
     out.sum().backward()
     torch.testing.assert_close(out, ref, rtol=2e-3, atol=2e-3)
     torch.testing.assert_close(x.grad, ref_grad, rtol=2e-3, atol=2e-3)
+
+
+def _one_byte_kernel(packed, state, nested):
+    """The earlier one-byte-per-lane kernel, launched directly."""
+    import triton
+
+    from solution import nf4
+
+    n_bytes = packed.numel()
+    out = torch.empty(state.shape, dtype=state.dtype, device=packed.device)
+    absmax = state.absmax if nested else state.absmax.float()
+    nf4.nf4_unpack_kernel[(triton.cdiv(n_bytes, nf4.BYTES_PER_PROGRAM),)](
+        packed, out, nf4._nf4_table(packed.device), absmax,
+        state.state2.code if nested else absmax, state.state2.absmax if nested else absmax,
+        state.offset if nested else absmax, n_bytes, NESTED=nested,
+        BYTES=nf4.BYTES_PER_PROGRAM, num_warps=4)
+    return out
+
+
+# (100, 64): 50 blocks, not a multiple of the 64 blocks of a program -> the masked path
+@pytest.mark.parametrize("shape", [(1536, 1536), (8960, 1536), (256, 1536), (1536, 8960),
+                                   (100, 64)])
+@pytest.mark.parametrize("nested", [True, False])
+def test_wide_kernel_is_bit_identical_to_the_one_byte_kernel(shape, nested):
+    import bitsandbytes.functional as F
+
+    from solution.nf4 import unpack_nf4
+
+    torch.manual_seed(1)
+    weight = torch.randn(shape, device="cuda", dtype=torch.float16) * 0.05
+    packed, state = F.quantize_4bit(weight, blocksize=64, quant_type="nf4",
+                                    compress_statistics=nested)
+    if nested:
+        wide = unpack_nf4(packed, state.shape, state.state2.absmax, 64, state.dtype,
+                          absmax_8bit=state.absmax, code=state.state2.code, offset=state.offset)
+    else:
+        wide = unpack_nf4(packed, state.shape, state.absmax.float(), 64, state.dtype)
+    assert torch.equal(wide, _one_byte_kernel(packed, state, nested))
