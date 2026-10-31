@@ -7,15 +7,17 @@ lives in `solution/` and is switched on by `solution.apply()`.
 
 | Kaggle T4, `harness/run_task.py --repeats 2` | Base Soup | MindX | Ratio |
 |---|---|---|---|
-| Time of `soup train` | 89.3 s | **58.4 s** | **1.53× faster** |
-| Peak GPU memory (nvidia-smi, whole run) | 14 345 MiB | **1 077 MiB** | **13.32× less** |
-| Eval loss on the public rows | 2.04965 | 2.04967 | **+0.001%** |
+| Time of `soup train` | 86.3 s | **62.0 s** | **1.39× faster** |
+| Peak GPU memory (nvidia-smi, whole run) | 14 345 MiB | **673 MiB** | **21.3× less** |
+| Eval loss on the public rows | 2.04966 | 2.04964 | **−0.001%** |
 | Official checks (`harness/check_rules.py`) | | **10 / 10 PASS** | |
 
-Measured run of commit `a0dfdee` (31.10, evening). Our own Triton kernels take 12.0% of the
-training time (check 4 needs 5%). The eval loss stays within ±0.005% of the base on every seed we
-ran (1, 7, 1234). We traded speed for memory on purpose: with recomputation off the same code runs
-in 48.6 s at 4.1 GB, see [Results](#results).
+Measured run of the final code (commit `7df91c3`, 31.10 evening; later commits change only a test
+import and documents). Our own Triton kernels take 12.8% of the training time (check 4 needs 5%).
+The eval loss stays within ±0.005% of the base on every seed we ran (1, 7, 1234). We traded speed
+for memory on purpose: the score is logarithmic in both ratios, and 1 077 → 673 MiB cost us only
+1.44× → 1.39×; with recomputation off the code runs about 6 s faster at 4.1 GB, see
+[Results](#results).
 
 **Public Kaggle notebook:** _link added at submission_ · Organizers' task description:
 [docs/CHALLENGE.md](docs/CHALLENGE.md)
@@ -39,14 +41,15 @@ Soup's fake test modules, other dtypes or shapes).
 | 6 | **NF4 unpacking kernel and a direct 4-bit linear.** bitsandbytes dequantizes the double-quantized NF4 weights in two kernels (8-bit absmax, then the 4-bit values); ours does it in one pass. For fp16 inputs our `Linear4bit` path runs exactly bitsandbytes' own ops (unpack, `F.linear`; backward unpack, matmul) without its Python dispatch layers, bit-identical. | `nf4.py`, `linear4bit.py` | 8% of the step in our kernel |
 | 7 | **RMSNorm forward/backward kernel.** One launch each way instead of 5–6 PyTorch ops; keeps the input and `rstd`. | `rmsnorm.py` | fewer launches |
 | 8 | **The tied embedding / `lm_head` table in pinned host memory.** The 445 MiB fp16 table leaves the GPU. The embedding lookup gathers the batch's rows on the host; the head walks the vocabulary in slices of 4 096 rows, each copied over PCIe into one of two GPU buffers while the previous one is used. Our `head_slice_kernel` carries each row's online-softmax state (running max, sum of exp, label logit, first argmax) from slice to slice in fp32 and, in the same walk, turns the slice into `exp(x − m)` so the hidden-state gradient is accumulated with FlashAttention-style rescaling: one pass over the table per step. Slice boundaries are multiples of the old kernel's block, so loss, entropy and argmax match it. | `head_stream.py` | −445 MiB |
-| 9 | **Cheaper recompute boundaries.** A rerun layer keeps its fp32 input as fp16 rows scaled by one fp32 factor per row (no overflow possible), and that copy waits for backward in pinned host memory. Layers that are not rerun keep the MLP's fp16 input instead of `gate` and `up` and redo those two matmuls in backward (same bytes, same kernels, no random draws). The token budget is 256: batches up to 256 real tokens rerun nothing. | `recompute.py`, `mlp_recompute.py` | −300 to −400 MiB, +2 s |
+| 9 | **Cheaper recompute boundaries.** A rerun layer keeps its fp32 input as fp16 rows scaled by one fp32 factor per row (no overflow possible), and that copy waits for backward in pinned host memory. Layers that are not rerun keep the MLP's fp16 input instead of `gate` and `up` and redo those two matmuls in backward (same bytes, same kernels, no random draws). The token budget is 0: every layer reruns (59.2 s / 675 MiB against 58.3 s / 957 MiB at 256, same machine). | `recompute.py`, `mlp_recompute.py` | −300 to −400 MiB, +2 s |
+| 12 | **Fewer launches around attention.** Per-row attention splits q/k/v with `split` (its backward is one `cat`; slicing gave a zero-filled full-size gradient and an add per row and tensor, ~1 000 launches per step) and transposes all rows' outputs with one copy after the `cat`. peft's LoRA scaling (2.0, a power of two, so exact in fp16) is applied inside `qkv_rope_kernel` instead of a separate multiply. Same bits (tested). | `unpad.py`, `attention.py` | −1 300 launches per step |
 | 10 | **LoRA dropout in one kernel.** The mask is drawn by PyTorch on the full padded shape exactly as in the base (same random numbers); our `lora_dropout_kernel` applies it to the real rows and writes the fp16 input of `lora_A` in one pass. | `unpad.py` | fewer launches |
 | 11 | **Startup.** Triton compiles our kernels in a background thread while Soup loads the model (first step 4.6 → 0.8 s); `importlib.metadata.packages_distributions()` (2.3 s) is computed once instead of twice; the unused `sklearn` and `wandb` imports are skipped (≈3 s); `TORCHDYNAMO_DISABLE` is set only while bitsandbytes is imported, so it does not build `torch.compile` wrappers for its CPU backend (1.2 s); checkpoint tensors are converted bf16 → fp16 on the GPU instead of the CPU (same values); the compile thread runs at `nice 19` so it does not take the CPU from training; the CUDA per-thread stack reservation is set to 256 B. All allowed by the organizers in the participants' chat (30–31 Oct), all inside the measured run. | `warmup.py`, `startup.py` | ≈ −9 s |
 
 ### Our kernels
 
-Share of the training time from the harness (CUDA events on our launches, steps 3–64, run of
-`a0dfdee`; 12.0% in total):
+Share of the training time from the harness (CUDA events on our launches, steps 3–64; per kernel
+from the profiled run of `1d3b11e`, 12.0% in total; 12.8% in the final run):
 
 | Kernel (`@triton.jit`) | File | Replaces | Share |
 |---|---|---|---|
@@ -152,16 +155,22 @@ single change was measured A/B on one machine where stated.
 | + offload at load, GPU dtype conversion, head chunk 256 | 83.5 → 58.4 | 1 209 | 2.04966 / 2.04966 | 1.43× | 11.87× | 10/10 |
 | budget 512, backward prefetch hints, one-kernel LoRA dropout | 88.3 → 50.8 | 2 067 | — (−0.001%) | 1.61× | 6.94× | 10/10 |
 | budget 256, wide NF4 kernel | 86.6 → 54.8 | 1 603 | — | 1.58× | 8.95× | 10/10 |
-| **+ embedding / head table in host memory, fp16 recompute inputs (`a0dfdee`)** | 89.3 → 58.4 | **1 077** | **2.04965 / 2.04967** | **1.53×** | **13.32×** | **10/10** |
+| + embedding / head table in host memory, fp16 recompute inputs (`a0dfdee`) | 89.3 → 58.4 | 1 077 | 2.04965 / 2.04967 | 1.53× | 13.32× | 10/10 |
+| − own tokenization (organizers' ruling), warm-up thread at nice 19 (`f5da29b`) | 79.6 → 55.2 | 1 077 | — (+0.002%) | 1.44× | 13.32× | 10/10 |
+| + gate/up recompute, recompute inputs in host memory, head slices of 4 096 (`196bd9a`) | 92.3 → 65.6 | 757 | 2.04963 / 2.04966 | 1.41× | 18.95× | 10/10 |
+| **+ recompute budget 0, fewer attention launches, LoRA scale in the kernel (`7df91c3`, final)** | **86.3 → 62.0** | **673** | **2.04966 / 2.04964** | **1.39×** | **21.3×** | **10/10** |
 
 Same-machine A/B: the per-row SDPA fix alone gives −6.3 s and −1 000 MiB; the fp16 attention path
 −7% of the step time. Eval loss stays within ±0.005% of the base in every run.
 
-Where the time goes now: cuBLAS matmuls are the largest part of the GPU time, our kernels 11.6%,
-the rest attention, casts and small ops; the GPU still waits for Python on Kaggle's slow CPU in
-part of each step (thousands of small launches). Where the memory goes now: CUDA context ≈ 0.2 GB,
-the fp16 tied embedding / `lm_head` 0.45 GB, recompute boundaries (the layer inputs, fp32) up to
-0.3 GB, one layer's working set, three 24 MiB weight slots and a 78 MB head chunk.
+Where the time goes now (profile of 16 steps of `1d3b11e`): cuBLAS matmuls ≈ 0.19 s per step, NF4
+unpacking, attention and small ops ≈ 0.15 s, host-to-device copies ≈ 0.14 s on a side stream
+(overlapped). Removing ~1 300 small launches per step did not change the time measurably, so the
+step is bound by GPU work, not by Python. Where the memory goes now: the CUDA context
+and allocator reserve (≈ 0.25 GB), one rerun layer's working set during its backward (the
+largest part: gate/up and their gradients, the unpacked weight, attention), three weight slots,
+two head slices, NF4 quantization state and the LoRA weights with their AdamW state. The tied
+table and every layer's saved input live in host memory.
 
 ## Limitations
 
@@ -190,6 +199,8 @@ the fp16 tied embedding / `lm_head` 0.45 GB, recompute boundaries (the layer inp
 | Gated MLP in one kernel | 1 s slower than cuBLAS + SwiGLU | slower |
 | Head over the vocabulary in two walks | race between the copy stream and the second walk (fixed by an event; replaced by one walk) | — |
 | Varlen attention over the packed batch | no gain over per-row SDPA on the T4 | — |
+| MLP of a rerun layer backpropagated in pieces of 512 tokens | 10/10 but 675 MiB (the peak is elsewhere) and 1.25× | slower, no gain |
+| Activations kept in host memory instead of recomputation | estimated −2…4 s | not built: needs async copies both ways; ran out of time |
 - On other data the speed-up depends on how much padding the batches have (43% here).
 
 ## Sources of ideas
