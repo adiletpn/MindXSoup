@@ -80,18 +80,110 @@ class Fp16InputCheckpoint(torch.autograd.Function):
         return (hidden.grad if ctx.needs_input_grad[0] else None), None, None
 
 
+offload = False  # set by patch_qwen2_layer_recompute(offload=True): no rerun, activations wait on the host
+OFFLOAD_MIN_BYTES = 256 * 1024  # smaller saved tensors (norm weights, cos/sin, scales) stay on the GPU
+KEEP_LAST = 1  # the last layers' activations stay on the GPU: their backward starts right away
+
+
+def _empty_like(tensor, device):
+    """Same shape, dtype and strides (when they are dense), pinned when on the host."""
+    pin = str(device) == "cpu"
+    try:
+        from torch._prims_common import is_non_overlapping_and_dense
+        dense = is_non_overlapping_and_dense(tensor)
+    except Exception:  # noqa: BLE001 - private helper; contiguous is always valid
+        dense = tensor.is_contiguous()
+    if dense:
+        return torch.empty_strided(tensor.size(), tensor.stride(), dtype=tensor.dtype,
+                                   device=device, pin_memory=pin)
+    return torch.empty(tensor.size(), dtype=tensor.dtype, device=device, pin_memory=pin)
+
+
+class _Stashed:
+    """One saved tensor that waits for backward in pinned host memory."""
+    __slots__ = ("host", "copied", "gpu", "ready", "device")
+
+
+class ActivationStash:
+    """Offloads what a decoder layer saves for backward (saved_tensors_hooks) and brings it back.
+
+    Forward: each large saved tensor is copied to pinned host memory on a side stream; the GPU
+    block is released once that copy has run (record_stream). Backward: when layer i's output
+    gradient is ready, layer i - 1's tensors start coming back on another side stream, so the
+    copies overlap layer i's backward. Unpacking waits for the copy, so correctness never depends
+    on the prefetch; the values are the same bytes."""
+
+    def __init__(self):
+        self.d2h = torch.cuda.Stream()
+        self.h2d = torch.cuda.Stream()
+        self.layers = {}  # layer -> list of _Stashed of the current step
+
+    def pack(self, layer):
+        def pack_hook(tensor):
+            if not tensor.is_cuda or tensor.numel() * tensor.element_size() < OFFLOAD_MIN_BYTES \
+                    or isinstance(tensor, torch.nn.Parameter):
+                return tensor
+            item = _Stashed()
+            item.device, item.gpu, item.ready = tensor.device, None, None
+            item.host = _empty_like(tensor, "cpu")
+            produced = torch.cuda.Event()
+            produced.record(torch.cuda.current_stream())
+            with torch.cuda.stream(self.d2h):
+                self.d2h.wait_event(produced)
+                item.host.copy_(tensor, non_blocking=True)
+                tensor.record_stream(self.d2h)
+                item.copied = torch.cuda.Event()
+                item.copied.record(self.d2h)
+            self.layers.setdefault(layer, []).append(item)
+            return item
+        return pack_hook
+
+    def unpack(self, packed):
+        if not isinstance(packed, _Stashed):
+            return packed
+        compute = torch.cuda.current_stream()
+        if packed.gpu is None:
+            self._fetch(packed)
+        compute.wait_event(packed.ready)
+        tensor, packed.gpu = packed.gpu, None
+        tensor.record_stream(compute)
+        return tensor
+
+    def _fetch(self, item):
+        with torch.cuda.stream(self.h2d):
+            self.h2d.wait_event(item.copied)
+            item.gpu = _empty_like(item.host, item.device)
+            item.gpu.copy_(item.host, non_blocking=True)
+            item.ready = torch.cuda.Event()
+            item.ready.record(self.h2d)
+
+    def prefetch(self, layer):
+        for item in self.layers.pop(layer, ()):
+            if item.gpu is None:
+                self._fetch(item)
+
+
+_stash = None
+
+
 def _backward_begins(layer):
     if stream.active():
         stream.streamer().layer_begins(layer, forward=False)
+    if offload and _stash is not None:
+        _stash.layers.pop(layer, None)  # its tensors are unpacked (or fetched) from here on
+        _stash.prefetch(layer - 1)
 
 
-def patch_qwen2_layer_recompute(fp16=False, host=False):
+def patch_qwen2_layer_recompute(fp16=False, host=False, offload_activations=False):
     from transformers.models.qwen2 import modeling_qwen2
 
-    global enabled, fp16_inputs, host_inputs
+    global enabled, fp16_inputs, host_inputs, offload, BUDGET_TOKENS
     enabled = True
     fp16_inputs = fp16
     host_inputs = fp16 and host
+    offload = offload_activations
+    if offload:
+        BUDGET_TOKENS = 1 << 30  # nothing reruns
     cls = modeling_qwen2.Qwen2DecoderLayer
     if getattr(cls, "_mindx_recompute", False):
         return
@@ -109,7 +201,14 @@ def patch_qwen2_layer_recompute(fp16=False, host=False):
             if layer is None or not stream.active():
                 return original(self, hidden_states, *args, **kwargs)
             stream.streamer().layer_begins(layer, forward=True)
-            out = original(self, hidden_states, *args, **kwargs)
+            if offload and layer < n_layers - KEEP_LAST:
+                global _stash
+                if _stash is None:
+                    _stash = ActivationStash()
+                with torch.autograd.graph.saved_tensors_hooks(_stash.pack(layer), _stash.unpack):
+                    out = original(self, hidden_states, *args, **kwargs)
+            else:
+                out = original(self, hidden_states, *args, **kwargs)
             hidden = out[0] if isinstance(out, tuple) else out
             if isinstance(hidden, torch.Tensor) and hidden.requires_grad:
                 # backward of this (not recomputed) layer starts when its output's gradient is

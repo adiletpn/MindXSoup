@@ -29,7 +29,7 @@ FEATURES = {
     "startup_cache": True,   # CPU startup: no unused compile wrappers/sklearn/wandb, one metadata scan
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
     "mlp_fp16": True,        # MLP keeps fp16 activations (uses the example's SwiGLU kernel)
-    "mlp_gateup_recompute": True,  # layers not rerun keep the MLP input, redo gate/up in backward
+    "mlp_gateup_recompute": False,  # layers not rerun keep the MLP input, redo gate/up in backward
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
@@ -42,6 +42,7 @@ FEATURES = {
     "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
     "recompute_fp16_inputs": True,  # rerun layers keep their input as scaled fp16 rows, not fp32
     "recompute_host_inputs": True,  # ... and those fp16 rows wait for backward in pinned host memory
+    "offload_activations": True,  # instead of rerunning, layers' saved tensors wait in pinned host memory
     "stream_weights": True,  # decoder 4-bit weights in pinned host memory, one layer on the GPU at a time
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
@@ -103,7 +104,8 @@ def apply():
         patch_unpad()  # used by the fused head's forward
     if FEATURES["recompute"]:
         patch_qwen2_layer_recompute(fp16=FEATURES["recompute_fp16_inputs"],
-                                    host=FEATURES["recompute_host_inputs"])
+                                    host=FEATURES["recompute_host_inputs"],
+                                    offload_activations=FEATURES["offload_activations"])
     if FEATURES["stream_weights"] and FEATURES["nf4"] and FEATURES["nf4_direct"]:
         patch_stream_layers()  # set up by the fused head's forward, before the first step
     if FEATURES["fp16_embedding"]:
