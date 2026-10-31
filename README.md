@@ -204,6 +204,30 @@ table and every layer's saved input live in host memory.
 | Activations kept in host memory instead of recomputation | estimated −2…4 s | not built: needs async copies both ways; ran out of time |
 - On other data the speed-up depends on how much padding the batches have (43% here).
 
+## What next
+
+Not built; ordered by the gain we expect from our own measurements on the T4.
+
+| Idea | Expected | Basis and risk |
+|---|---|---|
+| Fused NF4 unpack + matmul on the T4's tensor cores (inline-PTX `mma`, QA 21) | −2…3 s | NF4 unpacking is ≈ 9% of the GPU time and every weight is unpacked three times per step (forward, rerun, backward); pays only if the fused matmul keeps cuBLAS speed |
+| Saved activations in pinned host memory with asynchronous copies both ways, instead of rerunning layers | −2…4 s, same peak | a rerun layer costs one extra forward; a layer's activations at ~1 400 tokens are tens of MiB each way over PCIe, so only part of them hides behind compute |
+| Fewer, larger elementwise kernels: residual add + RMSNorm + casts; the LoRA branch (dropout + A + B) in one or two | −1…3 s | ≈ 16% of the GPU time is small elementwise work; removing ~1 300 launches alone changed nothing measurable, so the gain is in memory passes, not launch count |
+| Startup: model weights read in a thread, lazier imports, cuBLAS initialized in the background | −1…2 s | loading in a thread measured ≤ 1 s; 2.4 s of metadata scan happen before `apply()` and cannot move |
+| int8 matmuls for the input gradient with a careful scale (QA 59) | ≤ 1 s | measured in a bench; check 6 leaves little room for error |
+| A rerun layer's backward on the batch in two halves (QA 64, dropout masks drawn in the original order) | −100…150 MiB | halves the largest working set at the peak; costs launches |
+| SwiGLU backward writing its gradients over gate and up (branch `swiglu-inplace`) | −49 MiB at the training peak | built and tested on its branch, not measured end to end before the deadline |
+| Vocabulary table in int8 with a per-row scale (QA 62) | −30…50 MiB of slice buffers | head and loss values change slightly; checks 5–7 decide |
+
+Below ~350 MiB is out of reach for this stack: the CUDA context with cuBLAS and the other
+libraries alone takes ~250 MiB.
+
+**What we learned.** A profile shows where the time goes, not what a change will save. Several
+ideas that a profile made look promising (CUDA graphs, removing ~1 300 small launches per step,
+the MLP backpropagated in pieces) gained nothing in a same-machine A/B; every change in the final
+solution was kept only after one. Kaggle machines differ by ±10%, so a number from another
+session is not evidence.
+
 ## Sources of ideas
 
 We wrote all code ourselves; these works gave the ideas:
