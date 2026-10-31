@@ -24,7 +24,7 @@
 | `qkv_rope_kernel` | `solution/attention.py` | LoRA add and scaling, RoPE and the fp16 casts of q/k/v, forward and backward | 0.8% |
 | `head_slice_kernel` | `solution/head_stream.py` | online softmax / CE / entropy / argmax and the hidden-state gradient over vocabulary slices of the host table | 0.5% |
 | `head_ce_rows_kernel`, `rope_kernel` | `solution/fused_ce.py`, `solution/rope.py` | fallbacks (head with the table on the GPU; RoPE outside the fp16 attention path) | — |
-| **total** | | | **12.8%** in the final run (12.0–17.3% across runs) |
+| **total** | | | **13.1%** in the final run (12.0–17.3% across runs) |
 
 Ideas taken from other work, with links (we wrote the code ourselves): Liger Kernel
 (arXiv:2410.10989), Cut Cross-Entropy (arXiv:2411.09009), RoFormer (arXiv:2104.09864), QLoRA
@@ -34,14 +34,14 @@ softmax (arXiv:1805.02867), ZeRO-Offload (arXiv:2101.06840). Details and
 the rule each technique relies on: README, "What we did" and "Within the rules".
 
 ## Results on Kaggle T4 (from `runs/result.json` and `runs/checks.json`)
-Final code, `harness/run_task.py --repeats 2` (commit `7df91c3`, 31.10 evening; the submitted
-commit differs only in a test import and documents). The notebook above re-runs it.
+Final code, `harness/run_task.py --repeats 2` (commit `73402c2`, 31.10 22:00; the submitted
+commit differs only in documents). The notebook above re-runs it.
 
 | | Base Soup | Ours | Ratio |
 |---|---|---|---|
-| Time of `soup train`, s | 86.3 | 62.0 | speedup 1.39× |
-| Peak GPU memory, MiB | 14 345 | 673 | base/ours 21.3× |
-| Eval loss (public rows) | 2.04966 | 2.04964 | −0.001% vs base |
+| Time of `soup train`, s | 81.1 | 60.4 | speedup 1.34× |
+| Peak GPU memory, MiB | 14 345 | 505 | base/ours 28.4× |
+| Eval loss (public rows) | 2.04964 | 2.04964 | 0.000% vs base |
 
 - [x] All 10 checks of `harness/check_rules.py` passed (every candidate run on 31.10; seeds 1, 7, 1234 earlier)
 - [x] README.md rewritten for our solution: what we did, how to run it, results, limits
@@ -53,7 +53,7 @@ steps.
 
 ## Limitations
 Every decoder layer is recomputed in backward (one extra forward per step): we traded that time for
-memory because the score is logarithmic in both ratios (1 077 → 673 MiB cost 1.44× → 1.39×).
+memory because the score is logarithmic in both ratios (1 077 → 505 MiB cost about 1.44× → 1.34×).
 The step is bound by cuBLAS matmuls and NF4 unpacking: cutting ~1 300 small launches per step did
 not change the time. Next steps: activations in host memory instead of recomputation, a fused NF4
 unpack + matmul. Own tokenization (−1.8 s) was removed after the organizers' ruling. Tuned for this
