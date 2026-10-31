@@ -60,6 +60,8 @@ def test_offloaded_table_gives_the_same_model_outputs():
     model = Qwen2ForCausalLM(config).cuda()
     for param in model.parameters():
         param.requires_grad_(False)
+    table = model.get_input_embeddings().weight
+    table.data = table.data.half().float()  # fp16 numbers, as the checkpoint's
     shrink_embedding(model)
     ids = torch.randint(0, 1000, (2, 17), device="cuda")
     with torch.no_grad():

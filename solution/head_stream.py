@@ -161,9 +161,13 @@ def head_ce(flat, table, target, grad_scale, with_grad):
     best_idx = torch.zeros(rows, dtype=torch.int32, device=dev)
     lse = torch.empty(rows, dtype=torch.float32, device=dev)
     state = (m, s, t, best, best_idx, x_target, lse)
-    logits = torch.empty((rows, SLICE), dtype=torch.float16, device=dev)
+    logits = torch.empty(rows * SLICE, dtype=torch.float16, device=dev)
+
+    def contiguous_buffer(width):  # the kernel walks rows of exactly `width` columns
+        return logits[:rows * width].view(rows, width)
+
     for col0, w in table.slices():
-        buf = logits[:, :w.shape[0]]
+        buf = contiguous_buffer(w.shape[0])
         torch.mm(flat, w.t(), out=buf)
         launch_slice(buf, target, state, col0, grad_scale, grad=False)
     torch.add(m, torch.log(s), out=lse)
@@ -174,7 +178,7 @@ def head_ce(flat, table, target, grad_scale, with_grad):
     if with_grad:
         grad = torch.zeros((rows, flat.shape[1]), dtype=torch.float32, device=dev)
         for col0, w in table.slices():
-            buf = logits[:, :w.shape[0]]
+            buf = contiguous_buffer(w.shape[0])
             torch.mm(flat, w.t(), out=buf)
             launch_slice(buf, target, state, col0, grad_scale, grad=True)
             grad += torch.mm(buf, w).float()
