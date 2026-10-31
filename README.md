@@ -135,7 +135,22 @@ To see what one change gives, set its entry in `FEATURES` (`solution/__init__.py
 
 All on Kaggle T4, `--repeats 2` unless noted, full log in [docs/results.md](docs/results.md).
 Kaggle machines differ by up to ±10% between sessions, so compare within a row; the effect of a
-single change was measured A/B on one machine where stated.
+single change was measured A/B on one machine where stated. Time is the harness's median over
+the repeats, the peak its maximum (nvidia-smi over the whole process).
+
+### Final solution vs. base
+
+The final commit `73402c2`, `harness/run_task.py --repeats 2`, each run on its own Kaggle T4:
+
+| Run | Base, s | MindX, s | Speed-up | Peak base → MindX, MiB | Memory | Eval loss base / MindX | Checks, tests |
+|---|---|---|---|---|---|---|---|
+| seed 1 (`mindx-final500b`) | 79.75 / 82.35 | **60.30 / 60.50** | **1.34×** | 14 345 → **505** | **28.4×** | 2.04964 / 2.04964 (0.000%) | 10/10, own kernels 13.1%, 135 tests |
+| seed 1, another machine (`dilya-f500`) | 92.49 / 85.56 | 64.05 / 63.70 | 1.39× | 14 345 → 505 | 28.4× | 2.04967 / 2.04965 (−0.001%) | 10/10, own kernels 12.9%, 135 tests |
+
+The same code on two machines gives 1.34× and 1.39×: the base itself took 79.8–92.5 s. The peak is
+the same 505 MiB in every run, and PyTorch's own peak is 343 MiB.
+
+### How we got here
 
 | Step (cumulative) | Time base → ours, s | Peak, MiB | Eval loss base / ours | Speed-up | Memory | Checks |
 |---|---|---|---|---|---|---|
@@ -164,27 +179,58 @@ single change was measured A/B on one machine where stated.
 Same-machine A/B: the per-row SDPA fix alone gives −6.3 s and −1 000 MiB; the fp16 attention path
 −7% of the step time. Eval loss stays within ±0.005% of the base in every run.
 
-Where the time goes now (profile of 16 steps of `1d3b11e`): cuBLAS matmuls ≈ 0.19 s per step, NF4
-unpacking, attention and small ops ≈ 0.15 s, host-to-device copies ≈ 0.14 s on a side stream
-(overlapped). Removing ~1 300 small launches per step did not change the time measurably, so the
-step is bound by GPU work, not by Python. Where the memory goes now: the CUDA context
-and allocator reserve (≈ 0.25 GB), one rerun layer's working set during its backward (the
-largest part: gate/up and their gradients, the unpacked weight, attention), three weight slots,
-two head slices, NF4 quantization state and the LoRA weights with their AdamW state. The tied
-table and every layer's saved input live in host memory.
+### Speed against memory, measured on one machine
+
+Each rung adds one change to the previous one (`1d3b11e`, one run each, `aqniet/dilya-ladder`).
+Points by the score formula with the base at 86.6 s / 14 345 MiB and a best team assumed at
+41 s / 600 MiB:
+
+| Rung | Time, s | Peak, MiB | Median step, s | Points (35 + 30) |
+|---|---|---|---|---|
+| `1d3b11e` | 55.0 | 1 077 | 0.510 | ≈ 45.7 |
+| + recompute budget 512 | 54.7 | 1 561 | 0.528 | ≈ 42.5 |
+| + decoder weights kept on the GPU | 53.4 | 2 127 | 0.532 | ≈ 40.7 |
+| + embedding / head table kept on the GPU | 53.3 | 2 527 | 0.538 | ≈ 39.1 |
+| + no recomputation | 48.6 | 4 149 | 0.465 | ≈ 38.8 |
+
+Every rung wins less on speed than it loses on memory, so we went the other way: on the final code
+budget 0 instead of 256 costs ≈ +1 s for −282 MiB (59.2 s / 675 MiB vs 58.3 s / 957 MiB).
+
+### Where the time and the memory go now
+
+**Time.** Profile of 16 steps of `1d3b11e`: cuBLAS matmuls ≈ 0.19 s per step, NF4 unpacking,
+attention and small ops ≈ 0.15 s, host-to-device copies ≈ 0.14 s on a side stream (overlapped).
+Removing ~1 300 small launches per step did not change the time measurably, so the step is bound by
+GPU work, not by Python. An earlier, finer GPU profile ([docs/runtime_profile.md](docs/runtime_profile.md),
+`7384b69`, **measured before PR #11**, so before the host-memory table and the final recomputation):
+matmuls 43% of the summed GPU time, host-to-device copies 23%, NF4 unpacking 9%, attention 5%,
+elementwise ops, SwiGLU, casts and dropout ≈ 4% each. About 19 s of each run is outside the
+training loop; 2.4 s of it is the metadata scan in `import transformers`, before `apply()` runs.
+
+**Memory.** A replay of the CUDA allocator's history (`tools/peak_memory.py`) puts PyTorch's peak
+(343 MiB) in the backward of a rerun decoder layer on the longest batch: that layer's gate/up and
+their gradients (≈ 120 MiB at 1 430 tokens), the gradient of `down_proj`'s input, the two 22 MiB
+decoder weight slots, two 12 MiB head slices, the rerun layer's attention and dropout tensors,
+20 MiB of NF4 quantization state and 25 MiB of LoRA weights with their AdamW state. The tied table
+and every layer's saved input live in host memory. nvidia-smi adds the CUDA context and the
+allocator's cache: 505 MiB in total.
 
 ## Limitations
 
-- Tuned for this task: Qwen2 with SDPA attention, a T4 with fp16 autocast, NF4 with double
-  quantization, right padding. Anything else takes the original code (correct, not faster); new
-  sizes only compile again.
-- The step is bound by cuBLAS matmuls and small launches; the next speed-up would be a fused NF4
-  unpack + matmul kernel (the weights are unpacked three times per step now) and fewer, larger
-  elementwise kernels.
-- Long batches rerun most decoder layers in backward (one extra forward of those layers); we chose
-  memory because the score rewards the larger relative gain.
-- Weight streaming relies on PCIe overlapping with compute; very short batches (fewer tokens than
-  a layer's copy time covers) can wait for their weights.
+- **Only this setup is faster.** Tuned for Qwen2 with SDPA attention on a T4 with fp16 autocast,
+  NF4 with double quantization, right padding. Anything else (bf16 GPUs, other models or
+  quantization) takes the original code: correct, not faster. New sizes only compile again.
+- **Weight and table streaming depend on PCIe.** The decoder weights and the vocabulary table live
+  in pinned host memory and cross PCIe every step, hidden behind compute on the T4 (12.4 GB/s). On a
+  slower bus, or for very short batches whose compute is shorter than a layer's copy, the step
+  waits for its weights.
+- **We chose memory over speed.** Every decoder layer reruns its forward in backward (budget 0):
+  the final run is 1.34–1.39× faster than the base, while our fastest configurations reached
+  1.78× (49.3 s at 3.5 GB) and 48.6 s at 4.1 GB.
+- **Kaggle time varies by ±10%** between machines and sessions (the same base: 79.8–92.5 s), so the
+  speed-up depends on the machine the jury gets; single changes were measured A/B on one machine.
+- The step is bound by cuBLAS matmuls and memory passes of small kernels; see [What next](#what-next).
+- On other data the speed-up depends on how much padding the batches have (43% here).
 - Removed after an organizers' ruling: tokenizing the SFT rows in our own loop (same tokens,
   −1.8 s) is not allowed, because the dataset fingerprint then differs from Soup's `map`.
 
@@ -199,10 +245,14 @@ table and every layer's saved input live in host memory.
 | int8 forward | first-step loss off by > 1% on 10 of 64 batches | breaks check 6 |
 | Gated MLP in one kernel | 1 s slower than cuBLAS + SwiGLU | slower |
 | Head over the vocabulary in two walks | race between the copy stream and the second walk (fixed by an event; replaced by one walk) | — |
-| Varlen attention over the packed batch | no gain over per-row SDPA on the T4 | — |
+| Varlen attention over the packed batch | 10/10, 55.5 s vs 54.8 s for per-row SDPA | no gain |
 | MLP of a rerun layer backpropagated in pieces of 512 tokens | 10/10 but 675 MiB (the peak is elsewhere) and 1.25× | slower, no gain |
 | Activations kept in host memory instead of recomputation | estimated −2…4 s | not built: needs async copies both ways; ran out of time |
-- On other data the speed-up depends on how much padding the batches have (43% here).
+| Recomputation budget 256 instead of 0 (final code) | −0.9 s, +282 MiB | memory |
+| CUDA graphs for the decoder step | 0% at ~1 000 tokens per batch | no gain |
+| fp16 copies of the LoRA weights cached per step (fewer casts) | ≈ 0.2 s per run (8–12 weight casts per layer-step, 0.15–0.20% of device time) | too small |
+| Loading the model in a background thread | ≤ 1 s | within Kaggle's noise |
+| Fused q/k/v projection; `.item()` syncs deferred after backward; backward prefetch hints | no gain in A/B on one machine | — |
 
 ## What next
 

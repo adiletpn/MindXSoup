@@ -1,0 +1,210 @@
+{
+  "unprofiled": {
+    "wall_s": 55.98,
+    "train_loop_s": 34.76,
+    "outside_loop_s": 21.22,
+    "apply_s_included_in_wall": 4.44,
+    "steps": 64,
+    "median_step_s": 0.5012,
+    "first_step_s": 1.626,
+    "gpu_peak_mib": 1585,
+    "eval_loss": 2.04962
+  },
+  "profile_active_steps": 16,
+  "summed_gpu_ms_per_step": 427.86648343750664,
+  "groups": [
+    {
+      "name": "matmul",
+      "ms_per_step": 186.08187775000044,
+      "percent_gpu_sum": 43.49064134563819,
+      "calls_per_step": 915.25
+    },
+    {
+      "name": "host_to_device",
+      "ms_per_step": 99.07342568749971,
+      "percent_gpu_sum": 23.155220033019994,
+      "calls_per_step": 55.0
+    },
+    {
+      "name": "nf4_unpack",
+      "ms_per_step": 37.71758325000103,
+      "percent_gpu_sum": 8.815269414649064,
+      "calls_per_step": 499.625
+    },
+    {
+      "name": "attention",
+      "ms_per_step": 21.18688368749987,
+      "percent_gpu_sum": 4.951751190531002,
+      "calls_per_step": 297.75
+    },
+    {
+      "name": "elementwise",
+      "ms_per_step": 20.873420625002414,
+      "percent_gpu_sum": 4.878489302855419,
+      "calls_per_step": 1117.125
+    },
+    {
+      "name": "swiglu",
+      "ms_per_step": 16.028839062499408,
+      "percent_gpu_sum": 3.746224507636749,
+      "calls_per_step": 74.4375
+    },
+    {
+      "name": "cast_copy",
+      "ms_per_step": 15.902683312502676,
+      "percent_gpu_sum": 3.7167396671829733,
+      "calls_per_step": 1080.25
+    },
+    {
+      "name": "dropout",
+      "ms_per_step": 15.272173312501788,
+      "percent_gpu_sum": 3.5693782765605224,
+      "calls_per_step": 239.75
+    },
+    {
+      "name": "rmsnorm",
+      "ms_per_step": 7.18628887500039,
+      "percent_gpu_sum": 1.6795634042810004,
+      "calls_per_step": 149.875
+    },
+    {
+      "name": "head_loss_reduction",
+      "ms_per_step": 3.0584064375000817,
+      "percent_gpu_sum": 0.7148039297045773,
+      "calls_per_step": 3.4375
+    },
+    {
+      "name": "rope_qkv",
+      "ms_per_step": 2.7004623750000354,
+      "percent_gpu_sum": 0.6311460419391461,
+      "calls_per_step": 74.4375
+    },
+    {
+      "name": "reduction",
+      "ms_per_step": 1.4720371874988487,
+      "percent_gpu_sum": 0.3440412475575109,
+      "calls_per_step": 130.8125
+    },
+    {
+      "name": "other",
+      "ms_per_step": 1.279870562499788,
+      "percent_gpu_sum": 0.2991284926590244,
+      "calls_per_step": 203.5625
+    },
+    {
+      "name": "device_to_host",
+      "ms_per_step": 0.03253131250018557,
+      "percent_gpu_sum": 0.007603145784831504,
+      "calls_per_step": 21.0
+    }
+  ],
+  "top_kernels": [
+    {
+      "name": "Memcpy HtoD (Pinned -> Device)",
+      "time_us": 1585174.8109999953,
+      "count": 880
+    },
+    {
+      "name": "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_tn",
+      "time_us": 890443.9179999763,
+      "count": 1724
+    },
+    {
+      "name": "turing_fp16_s1688gemm_fp16_256x128_ldg8_f2f_stages_32x1_nn",
+      "time_us": 837753.6350000307,
+      "count": 1681
+    },
+    {
+      "name": "nf4_unpack_wide_kernel",
+      "time_us": 603481.3320000165,
+      "count": 7994
+    },
+    {
+      "name": "turing_fp16_s1688gemm_fp16_256x128_ldg8_f2f_tn",
+      "time_us": 451679.6529999961,
+      "count": 394
+    },
+    {
+      "name": "turing_fp16_s1688gemm_fp16_128x256_ldg8_f2f_stages_32x1_nn",
+      "time_us": 266429.43299998663,
+      "count": 832
+    },
+    {
+      "name": "fmha_cutlassB_f16_aligned_128x64_k128_sm75(PyTorchMemEffAttention::AttentionBackwardKernel<cutlass::arch::Sm75, cutlass::half_t, true, false, false, 128, 64, 128, false>::Params)",
+      "time_us": 239770.0060000029,
+      "count": 1792
+    },
+    {
+      "name": "void at::native::(anonymous namespace)::fused_dropout_kernel_vec<float, float, unsigned int, 1, 4, bool>(at::cuda::detail::TensorInfo<float const, unsigned int>, at::cuda::detail::TensorInfo<float, unsigned int>, at::cuda::detail::TensorInfo<bool, unsigned int>, unsigned int, float, at::PhiloxCudaState)",
+      "time_us": 133257.68700002495,
+      "count": 1486
+    },
+    {
+      "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul>)",
+      "time_us": 130889.20699999592,
+      "count": 2224
+    },
+    {
+      "name": "example_swiglu_bwd_kernel",
+      "time_us": 130686.94600000884,
+      "count": 448
+    },
+    {
+      "name": "example_swiglu_fwd_kernel",
+      "time_us": 125774.47899998167,
+      "count": 743
+    },
+    {
+      "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::Half>, std::array<char*, 3ul> >(int, at::native::CUDAFunctor_add<c10::Half>, std::array<char*, 3ul>)",
+      "time_us": 124765.81899999647,
+      "count": 5344
+    },
+    {
+      "name": "turing_fp16_s1688gemm_fp16_128x256_ldg8_f2f_stages_32x1_tn",
+      "time_us": 124058.15500000678,
+      "count": 579
+    },
+    {
+      "name": "turing_fp16_s1688gemm_fp16_128x128_ldg8_f2f_nn",
+      "time_us": 113240.41700000246,
+      "count": 305
+    },
+    {
+      "name": "lora_dropout_kernel",
+      "time_us": 111097.08600000369,
+      "count": 2350
+    },
+    {
+      "name": "fmha_cutlassF_f16_aligned_32x128_rf_sm75(PyTorchMemEffAttention::AttentionKernel<cutlass::half_t, cutlass::arch::Sm75, true, 32, 128, 128, true, true>::Params)",
+      "time_us": 99220.132999995,
+      "count": 2972
+    },
+    {
+      "name": "void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#10}::operator()() const::{lambda(c10::Half)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#10}::operator()() const::{lambda(c10::Half)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#10}::operator()() const::{lambda(c10::Half)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#10}::operator()() const::{lambda(c10::Half)#1} const&)::{lambda(int)#1})",
+      "time_us": 81481.56500002334,
+      "count": 6862
+    },
+    {
+      "name": "void at::native::vectorized_elementwise_kernel<4, at::native::float16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul> >(int, at::native::float16_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda(float)#1}, std::array<char*, 2ul>)",
+      "time_us": 70962.04999999158,
+      "count": 5409
+    },
+    {
+      "name": "rmsnorm_fwd_kernel",
+      "time_us": 61377.23400000393,
+      "count": 1502
+    },
+    {
+      "name": "turing_fp16_s1688gemm_fp16_128x128_ldg8_relu_f2f_tn",
+      "time_us": 57240.054999999236,
+      "count": 790
+    }
+  ],
+  "limitations": [
+    "One unprofiled run, not a paired speedup comparison",
+    "GPU event durations can overlap across streams",
+    "Kernel-name categories do not distinguish head GEMMs from decoder GEMMs",
+    "Outside-loop time includes imports, loading, preparation and saving",
+    "No base run; no claim of all ten rule checks"
+  ]
+}

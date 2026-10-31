@@ -110,3 +110,5 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **31.10 final-600 eb34afd (MLP in pieces in the rerun backward), mindx-finalfast2: 10/10, 136 tests.** 64.65/64.72 s vs base 80.0/82.2 (1.254x), 675 MiB (21.25x): no memory gain (the peak is not in the MLP), slower. Not taken.
 
 **31.10 22:00 final-500 73402c2 (vocabulary table loaded straight into pinned host memory), mindx-final500b: 10/10, 135 tests.** 60.30/60.50 s vs base 79.75/82.35 (1.342x), **505 MiB (28.41x)**, eval 0.000%, own kernels 13.1%, torch max allocated 343 MiB. **Final.**
+
+**31.10 final-500 73402c2 on another machine (Dilya, aqniet/dilya-f500): 10/10, 135 tests.** 64.05/63.70 s vs base 92.49/85.56 (1.394x), **505 MiB (28.41x)**, eval -0.001%, own kernels 12.9%.
