@@ -19,7 +19,7 @@ for memory on purpose: the score is logarithmic in both ratios, and 1 077 → 50
 1.44× → 1.34×; with recomputation off the code runs about 6 s faster at 4.1 GB, see
 [Results](#results).
 
-**Public Kaggle notebook:** https://www.kaggle.com/code/ansargabit/mindx-soup-kernel-challenge (COMMIT = `d0ef96f`) · Organizers' task description:
+**Public Kaggle notebook:** https://www.kaggle.com/code/adiletzholdasbek/notebook659c3b6e49 (COMMIT = `d0ef96f`) · Organizers' task description:
 [docs/CHALLENGE.md](docs/CHALLENGE.md)
 
 ## What we did
