@@ -153,8 +153,8 @@ The final commit `73402c2`, `harness/run_task.py --repeats 2`, each run on its o
 | seed 1, another machine (`dilya-f500`) | 92.49 / 85.56 | 64.05 / 63.70 | 1.39× | 14 345 → 505 | 28.4× | 2.04967 / 2.04965 (−0.001%) | 10/10, own kernels 12.9%, 135 tests |
 | seed 7 (`dilya-f500-s7`) | 79.77 / 85.69 | 62.62 / 64.58 | 1.30× | 14 351 → 507 | 28.3× | 2.05115 / 2.05117 (+0.001%) | 10/10, own kernels 12.1%, 135 tests |
 
-The same code on two machines gives 1.34× and 1.39×: the base itself took 79.8–92.5 s. The peak is
-the same 505 MiB in every run, and PyTorch's own peak is 343 MiB.
+The same code gives 1.30–1.39× on different machines: the base itself took 79.8–92.5 s. The peak is
+505–507 MiB in every run, and PyTorch's own peak is 343 MiB.
 
 ### How we got here
 
