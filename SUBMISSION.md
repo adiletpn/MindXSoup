@@ -1,7 +1,7 @@
 # Submission: MindX
 
 ## Links
-- Repository, final commit: https://github.com/BAITC-Hacks/hack-3e361ee8-mindx/commit/<FINAL_SHA> _(set at submission, 31.10)_
+- Repository, final commit: https://github.com/BAITC-Hacks/hack-3e361ee8-mindx/commit/d0ef96fd6dbe16803fb4b4ffb441751a2217e12c (code identical to the measured 73402c2; later commits change only documents)
 - Public Kaggle notebook, the saved version (`COMMIT` in it = the sha above; the same link is in
   the README): <KAGGLE_NOTEBOOK_URL>?scriptVersionId=<VERSION> _(set at submission)_
 - Demo video (up to 3 minutes): <VIDEO_URL> _(set at submission)_
