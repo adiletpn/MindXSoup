@@ -151,6 +151,7 @@ The final commit `73402c2`, `harness/run_task.py --repeats 2`, each run on its o
 |---|---|---|---|---|---|---|---|
 | seed 1 (`mindx-final500b`) | 79.75 / 82.35 | **60.30 / 60.50** | **1.34×** | 14 345 → **505** | **28.4×** | 2.04964 / 2.04964 (0.000%) | 10/10, own kernels 13.1%, 135 tests |
 | seed 1, another machine (`dilya-f500`) | 92.49 / 85.56 | 64.05 / 63.70 | 1.39× | 14 345 → 505 | 28.4× | 2.04967 / 2.04965 (−0.001%) | 10/10, own kernels 12.9%, 135 tests |
+| seed 7 (`dilya-f500-s7`) | 79.77 / 85.69 | 62.62 / 64.58 | 1.30× | 14 351 → 507 | 28.3× | 2.05115 / 2.05117 (+0.001%) | 10/10, own kernels 12.1%, 135 tests |
 
 The same code on two machines gives 1.34× and 1.39×: the base itself took 79.8–92.5 s. The peak is
 the same 505 MiB in every run, and PyTorch's own peak is 343 MiB.
@@ -272,7 +273,7 @@ Not built; ordered by the gain we expect from our own measurements on the T4.
 | Startup: model weights read in a thread, lazier imports, cuBLAS initialized in the background | −1…2 s | loading in a thread measured ≤ 1 s; 2.4 s of metadata scan happen before `apply()` and cannot move |
 | int8 matmuls for the input gradient with a careful scale (QA 59) | ≤ 1 s | measured in a bench; check 6 leaves little room for error |
 | A rerun layer's backward on the batch in two halves (QA 64, dropout masks drawn in the original order) | −100…150 MiB | halves the largest working set at the peak; costs launches |
-| SwiGLU backward writing its gradients over gate and up (branch `swiglu-inplace`) | −49 MiB at the training peak | built and tested on its branch, not measured end to end before the deadline |
+| SwiGLU backward writing its gradients over gate and up (branch `swiglu-inplace`) | 505 → 485 MiB, time unchanged (A/B on one T4, 2 runs each) | built and tested (10/10 not run); −4% is below the score's 5% threshold, so not taken before the deadline |
 | Vocabulary table in int8 with a per-row scale (QA 62) | −30…50 MiB of slice buffers | head and loss values change slightly; checks 5–7 decide |
 
 Below ~350 MiB is out of reach for this stack: the CUDA context with cuBLAS and the other
