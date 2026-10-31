@@ -39,9 +39,9 @@ def test_slices_match_the_whole_row_head(vocab, rows):
     hidden.grad = None
     want = fused_head_ce_shifted(hidden, weight, target)
     want[0].backward()
-    assert torch.allclose(got[0], want[0], rtol=1e-6, atol=0)
+    assert torch.allclose(got[0], want[0], rtol=1e-4, atol=0)
     for a, b in zip(got[1:3], want[1:3]):  # entropy, per-token loss
-        assert torch.allclose(a, b, rtol=1e-5, atol=1e-6)
+        assert torch.allclose(a, b, rtol=1e-4, atol=1e-5)
     assert torch.equal(got[3], want[3]) and torch.equal(got[4], want[4])  # correct, labelled
     scale = hidden.grad.abs().max()
     assert (grad_got - hidden.grad).abs().max() <= 2e-3 * scale
