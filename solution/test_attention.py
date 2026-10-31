@@ -221,3 +221,29 @@ def test_qkv_rope_kernel_against_pytorch(n_tokens):
     for a, b in zip(our_grads, ref_grads):
         assert a.dtype == b.dtype and a.shape == b.shape
         torch.testing.assert_close(a.float(), b.float(), rtol=2e-3, atol=2e-3)
+
+
+def test_power_of_two_lora_scale_in_the_kernel_is_bit_exact():
+    from solution.attention import qkv_rope
+
+    torch.manual_seed(1)
+    batch, n_tokens = 2, 37
+
+    def proj(heads):
+        return (torch.randn(batch, n_tokens, heads * HEAD_DIM, device="cuda") * 2).half() \
+            .requires_grad_(True)
+
+    q_base, q_lora, k, v_base, v_lora = proj(Q_HEADS), proj(Q_HEADS), proj(KV_HEADS), \
+        proj(KV_HEADS), proj(KV_HEADS)
+    cos, sin = model_like_cos_sin(batch, n_tokens, torch.float32)
+    inputs_ = (q_base, q_lora, k, v_base, v_lora)
+    # peft's way: the LoRA output times scaling (2.0 here) first, then our kernel adds it
+    want = qkv_rope(q_base, q_lora * 2.0, k, v_base, v_lora * 2.0, cos, sin, Q_HEADS, KV_HEADS)
+    got = qkv_rope(q_base, q_lora, k, v_base, v_lora, cos, sin, Q_HEADS, KV_HEADS, 2.0, 2.0)
+    grads = [torch.randn_like(r) for r in want]
+    want_grads = torch.autograd.grad(want, inputs_, grads)
+    got_grads = torch.autograd.grad(got, inputs_, grads)
+    for a, b in zip(got, want):
+        assert torch.equal(a, b)
+    for a, b in zip(got_grads, want_grads):
+        assert torch.equal(a, b)

@@ -15,6 +15,8 @@ Backward is the same kernel: it rotates dq and dk back in fp32 and writes fp16 g
 projections' [B, T, heads * D] layout, which the base also rounded to fp16 before the matmuls.
 """
 
+import math
+
 import torch
 import triton
 import triton.language as tl
@@ -24,9 +26,9 @@ from .mlp import _is_fp16_4bit
 
 @triton.jit
 def _qkv_heads(a_ptr, b_ptr, y_ptr, bi, t, sab, sah, sat, sbb, sbh, sbt, syb, syh, syt,
-               c1, c2, p, r, N_HEADS: tl.constexpr, BLOCK_H: tl.constexpr, HALF: tl.constexpr,
+               c1, c2, p, r, b_scale, N_HEADS: tl.constexpr, BLOCK_H: tl.constexpr, HALF: tl.constexpr,
                ADD: tl.constexpr, ROTATE: tl.constexpr):
-    # x = a (+ b), then y1 = x1 * c1 + x2 * p,  y2 = x2 * c2 + x1 * r  (or y = x), in fp32
+    # x = a (+ b * b_scale), then y1 = x1 * c1 + x2 * p,  y2 = x2 * c2 + x1 * r  (or y = x), in fp32
     heads = tl.arange(0, BLOCK_H)[:, None]
     cols = tl.arange(0, HALF)[None, :]
     mask = heads < N_HEADS
@@ -35,8 +37,8 @@ def _qkv_heads(a_ptr, b_ptr, y_ptr, bi, t, sab, sah, sat, sbb, sbh, sbt, syb, sy
     x2 = tl.load(a + HALF, mask=mask, other=0.0).to(tl.float32)
     if ADD:
         b = b_ptr + bi * sbb + t * sbt + heads * sbh + cols
-        x1 += tl.load(b, mask=mask, other=0.0).to(tl.float32)
-        x2 += tl.load(b + HALF, mask=mask, other=0.0).to(tl.float32)
+        x1 += tl.load(b, mask=mask, other=0.0).to(tl.float32) * b_scale
+        x2 += tl.load(b + HALF, mask=mask, other=0.0).to(tl.float32) * b_scale
     if ROTATE:
         y1 = x1 * c1 + x2 * p
         y2 = x2 * c2 + x1 * r
@@ -52,9 +54,10 @@ def _qkv_heads(a_ptr, b_ptr, y_ptr, bi, t, sab, sah, sat, sbb, sbh, sbt, syb, sy
 # The rotation is the one of solution/rope.py: forward sign = +1, sin halves (1, 2); backward
 # sign = -1, sin halves (2, 1). n_tokens and the scalars change between calls and are not
 # specialized; every stride is a multiple of 16 for any T, so new lengths never recompile.
-@triton.jit(do_not_specialize=["n_tokens", "sin_a_off", "sin_b_off", "sign"])
+@triton.jit(do_not_specialize=["n_tokens", "sin_a_off", "sin_b_off", "sign", "q_scale",
+                               "v_scale"])
 def qkv_rope_kernel(qa_ptr, qb_ptr, k_ptr, va_ptr, vb_ptr, cos_ptr, sin_ptr, qo_ptr, ko_ptr,
-                    vo_ptr, n_tokens, sin_a_off, sin_b_off, sign,
+                    vo_ptr, n_tokens, sin_a_off, sin_b_off, sign, q_scale, v_scale,
                     sqab, sqah, sqat, sqbb, sqbh, sqbt, skb, skh, skt,
                     svab, svah, svat, svbb, svbh, svbt,
                     sqob, sqoh, sqot, skob, skoh, skot, svob, svoh, svot, scb, sct,
@@ -71,11 +74,11 @@ def qkv_rope_kernel(qa_ptr, qb_ptr, k_ptr, va_ptr, vb_ptr, cos_ptr, sin_ptr, qo_
     p = -sign * tl.load(sin_ptr + row + sin_a_off).to(tl.float32)
     r = sign * tl.load(sin_ptr + row + sin_b_off).to(tl.float32)
     _qkv_heads(qa_ptr, qb_ptr, qo_ptr, bi, t, sqab, sqah, sqat, sqbb, sqbh, sqbt,
-               sqob, sqoh, sqot, c1, c2, p, r, N_Q, BLOCK_Q, HALF, ADD_Q, True)
+               sqob, sqoh, sqot, c1, c2, p, r, q_scale, N_Q, BLOCK_Q, HALF, ADD_Q, True)
     _qkv_heads(k_ptr, k_ptr, ko_ptr, bi, t, skb, skh, skt, skb, skh, skt,
-               skob, skoh, skot, c1, c2, p, r, N_KV, BLOCK_KV, HALF, False, True)
+               skob, skoh, skot, c1, c2, p, r, 1.0, N_KV, BLOCK_KV, HALF, False, True)
     _qkv_heads(va_ptr, vb_ptr, vo_ptr, bi, t, svab, svah, svat, svbb, svbh, svbt,
-               svob, svoh, svot, c1, c2, p, r, N_KV, BLOCK_KV, HALF, ADD_V, False)
+               svob, svoh, svot, c1, c2, p, r, v_scale, N_KV, BLOCK_KV, HALF, ADD_V, False)
 
 
 def _heads(x, n_heads):
@@ -90,7 +93,7 @@ def _bhtd_strides(x):
     return x.stride(0), x.stride(1), x.stride(2)
 
 
-def _launch(backward, q_a, q_b, k, v_a, v_b, cos, sin, outs):
+def _launch(backward, q_a, q_b, k, v_a, v_b, cos, sin, outs, q_scale=1.0, v_scale=1.0):
     """q_a/k/v_a (+ q_b, v_b): [B, heads, T, D] views; outs: q, k, v destinations, same shapes."""
     batch, n_q, n_tokens, dim = q_a.shape
     n_kv = k.shape[1]
@@ -103,7 +106,7 @@ def _launch(backward, q_a, q_b, k, v_a, v_b, cos, sin, outs):
     q_o, k_o, v_o = outs
     qkv_rope_kernel[(batch * n_tokens,)](
         q_a, q_a if q_b is None else q_b, k, v_a, v_a if v_b is None else v_b, cos, sin,
-        q_o, k_o, v_o, n_tokens, sin_a_off, sin_b_off, sign,
+        q_o, k_o, v_o, n_tokens, sin_a_off, sin_b_off, sign, q_scale, v_scale,
         *_bhtd_strides(q_a), *_bhtd_strides(q_a if q_b is None else q_b), *_bhtd_strides(k),
         *_bhtd_strides(v_a), *_bhtd_strides(v_a if v_b is None else v_b),
         *_bhtd_strides(q_o), *_bhtd_strides(k_o), *_bhtd_strides(v_o),
@@ -122,18 +125,21 @@ def _empty_bhtd(batch, n_heads, n_tokens, dim, dtype, device):
 
 class QKVRoPEFunction(torch.autograd.Function):
     """fp16 (q_base + q_lora) rotated, k rotated, (v_base + v_lora); inputs are the projections'
-    [B, T, heads * D] outputs (LoRA parts may be None). Saves only cos and sin."""
+    [B, T, heads * D] outputs (LoRA parts may be None, and come times q_scale / v_scale: a power
+    of two, so the product is exact either way). Saves only cos and sin."""
 
     @staticmethod
-    def forward(ctx, q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv):
+    def forward(ctx, q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv, q_scale=1.0,
+                v_scale=1.0):
         q_a, k_h, v_a = _heads(q_base, n_q), _heads(k, n_kv), _heads(v_base, n_kv)
         q_b = None if q_lora is None else _heads(q_lora, n_q)
         v_b = None if v_lora is None else _heads(v_lora, n_kv)
         batch, _, n_tokens, dim = q_a.shape
         outs = tuple(_empty_bhtd(batch, n, n_tokens, dim, torch.float16, q_a.device)
                      for n in (n_q, n_kv, n_kv))
-        _launch(False, q_a, q_b, k_h, v_a, v_b, cos, sin, outs)
+        _launch(False, q_a, q_b, k_h, v_a, v_b, cos, sin, outs, q_scale, v_scale)
         ctx.save_for_backward(cos, sin)
+        ctx.scales = (1.0, q_scale, 1.0, 1.0, v_scale)
         ctx.meta = (n_q, n_kv, [None if x is None else x.dtype
                                 for x in (q_base, q_lora, k, v_base, v_lora)])
         return outs
@@ -151,20 +157,27 @@ class QKVRoPEFunction(torch.autograd.Function):
         g_q, g_k, g_v = (g.transpose(1, 2).reshape(batch, n_tokens, -1) for g in grads)
         out = []
         for i, (grad, dtype) in enumerate(zip((g_q, g_q, g_k, g_v, g_v), dtypes)):
-            out.append(grad.to(dtype) if dtype is not None and ctx.needs_input_grad[i] else None)
-        return (*out, None, None, None, None)
+            if dtype is None or not ctx.needs_input_grad[i]:
+                out.append(None)
+                continue
+            grad = grad.to(dtype)
+            out.append(grad * ctx.scales[i] if ctx.scales[i] != 1.0 else grad)
+        return (*out, None, None, None, None, None, None)
 
 
-def qkv_rope(q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv):
-    return QKVRoPEFunction.apply(q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv)
+def qkv_rope(q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv, q_scale=1.0, v_scale=1.0):
+    return QKVRoPEFunction.apply(q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv,
+                                 q_scale, v_scale)
 
 
 def _split_projection(proj):
-    """(fp16 4-bit base layer, LoRA function or None) for a bitsandbytes Linear4bit with fp16
-    compute, bare or wrapped by peft's LoRA Linear4bit with one plain adapter; else None."""
+    """(fp16 4-bit base layer, LoRA function or None, its scale) for a bitsandbytes Linear4bit
+    with fp16 compute, bare or wrapped by peft's LoRA Linear4bit with one plain adapter; else
+    None. A power-of-two LoRA scaling is left to qkv_rope_kernel (x * 2^k is exact in fp16 and
+    fp32 alike, so the sum is the same bits) and saves one launch each way."""
     lora_a = getattr(proj, "lora_A", None)
     if lora_a is None:  # checked first: peft's wrapper also exposes the base layer's weight
-        return (proj, None) if _is_fp16_4bit(proj) else None
+        return (proj, None, 1.0) if _is_fp16_4bit(proj) else None
     base = getattr(proj, "base_layer", None)
     if not _is_fp16_4bit(base):
         return None
@@ -176,11 +189,15 @@ def _split_projection(proj):
         return None
     name = active[0]
 
-    def lora(x):  # peft's vanilla LoRA branch under autocast (no dtype conversion there)
-        return proj.lora_B[name](proj.lora_A[name](proj.lora_dropout[name](x))) * \
-            proj.scaling[name]
+    scaling = proj.scaling[name]
+    exact = isinstance(scaling, (int, float)) and scaling > 0 and \
+        math.frexp(scaling)[0] == 0.5 and 2.0 ** -8 <= scaling <= 2.0 ** 8
 
-    return base, lora
+    def lora(x):  # peft's vanilla LoRA branch under autocast (no dtype conversion there)
+        out = proj.lora_B[name](proj.lora_A[name](proj.lora_dropout[name](x)))
+        return out if exact else out * scaling
+
+    return base, lora, (float(scaling) if exact else 1.0)
 
 
 def _fast_path_ok(module, hidden_states, position_embeddings, past_key_values, kwargs):
@@ -225,7 +242,7 @@ def patch_qwen2_attention_fp16():
         if parts is None or any(p is None for p in parts) or parts[1][1] is not None:
             return original(self, hidden_states, position_embeddings, attention_mask,
                             past_key_values, **kwargs)
-        (q_base_layer, q_lora), (k_layer, _), (v_base_layer, v_lora) = parts
+        (q_base_layer, q_lora, q_scale), (k_layer, _, _), (v_base_layer, v_lora, v_scale) = parts
         input_shape = hidden_states.shape[:-1]
         x16 = hidden_states.to(torch.float16)
         # same order as the base: q (base, LoRA dropout), k, v (base, LoRA dropout)
@@ -236,7 +253,8 @@ def patch_qwen2_attention_fp16():
         v_add = None if v_lora is None else v_lora(hidden_states)
         n_q, n_kv = q_base.shape[-1] // self.head_dim, k.shape[-1] // self.head_dim
         cos, sin = position_embeddings
-        query, key, value = qkv_rope(q_base, q_add, k, v_base, v_add, cos, sin, n_q, n_kv)
+        query, key, value = qkv_rope(q_base, q_add, k, v_base, v_add, cos, sin, n_q, n_kv,
+                                     q_scale, v_scale)
 
         attention_interface = modeling_qwen2.ALL_ATTENTION_FUNCTIONS.get_interface(
             self.config._attn_implementation, modeling_qwen2.eager_attention_forward)
