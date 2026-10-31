@@ -82,7 +82,7 @@ class Fp16InputCheckpoint(torch.autograd.Function):
 
 offload = False  # set by patch_qwen2_layer_recompute(offload=True): no rerun, activations wait on the host
 OFFLOAD_MIN_BYTES = 256 * 1024  # smaller saved tensors (norm weights, cos/sin, scales) stay on the GPU
-KEEP_LAST = 1  # the last layers' activations stay on the GPU: their backward starts right away
+KEEP_LAST = 2  # the last layers' activations stay on the GPU: their backward starts right away
 
 
 def _empty_like(tensor, device):
