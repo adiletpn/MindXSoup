@@ -165,6 +165,7 @@ single change was measured A/B on one machine where stated.
 | + gate/up recompute, recompute inputs in host memory, head slices of 4 096 (`196bd9a`) | 92.3 → 65.6 | 757 | 2.04963 / 2.04966 | 1.41× | 18.95× | 10/10 |
 | + recompute budget 0, fewer attention launches, LoRA scale in the kernel (`7df91c3`) | 86.3 → 62.0 | 673 | 2.04966 / 2.04964 | 1.39× | 21.3× | 10/10 |
 | **+ the table loaded straight into host memory (`73402c2`, final)** | **81.1 → 60.4** | **505** | **2.04964 / 2.04964** | **1.34×** | **28.4×** | **10/10** |
+| same, seed 7 (`d0ef96f`) | 84.8 → 65.2 | 507 | 2.05115 / 2.05121 | 1.30× | 28.3× | 10/10 |
 
 Same-machine A/B: the per-row SDPA fix alone gives −6.3 s and −1 000 MiB; the fp16 attention path
 −7% of the step time. Eval loss stays within ±0.005% of the base in every run.
