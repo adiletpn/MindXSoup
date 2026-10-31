@@ -1,4 +1,24 @@
-# MindX: Soup Kernel Challenge
+<div align="center">
+
+# MindX · Soup Kernel Challenge
+
+**Qwen2.5-1.5B fine-tunes in 505 MiB of GPU memory instead of 14 345, with the same result**
+
+![memory](https://img.shields.io/badge/peak_GPU_memory-505_MiB_(28.4×_less)-E8833A?style=for-the-badge)
+![speed](https://img.shields.io/badge/time-58.4_s_vs_86.1_s_(1.48×)-7FB0F0?style=for-the-badge)
+![checks](https://img.shields.io/badge/check__rules-10%2F10_PASS-78C88C?style=for-the-badge)
+![eval](https://img.shields.io/badge/eval_loss-−0.003%25_vs_base-12192B?style=for-the-badge)
+
+[Kaggle notebook](https://www.kaggle.com/code/adiletzholdasbek/notebook659c3b6e49) ·
+[Demo video](https://youtu.be/yW08Wo7Txa0) ·
+[Presentation](https://claude.ai/artifact/5VxkrALzzEKqkYcDhAjLZu) ·
+[Submission](SUBMISSION.md)
+
+*Decentrathon 6.0 · Adilet · Dilya · Ansar · Akniyet*
+
+</div>
+
+---
 
 Team MindX's solution for the Soup Kernel Challenge (Decentrathon 6.0). It makes the same
 `soup train` run (Qwen2.5-1.5B-Instruct, 4-bit NF4 + LoRA, 64 steps on a Kaggle T4) faster and
