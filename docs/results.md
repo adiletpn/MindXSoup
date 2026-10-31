@@ -100,3 +100,5 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **31.10 head-tok (one walk + tok + stack + fp16 inputs), mindx-headtok-full:** 37.8/37.9 s, 949 MiB, FAIL 5-7 (first step 0.01%, mean +4.6%, eval +3.9%): the fp16-input recompute had no tensor input requiring grad (the first layer input comes from the frozen embedding), so autograd skipped its backward. Fixed with an anchor input.
 
 **31.10 head-tok a0dfdee, mindx-headtok-full2: 10/10.** 58.32/58.56 s vs base 91.2/87.4 (1.528x), **1077 MiB (13.32x)**, eval +0.001%, own kernels 12.0%. PR #11.
+
+| 31.10 | main 1d3b11e (PR #11 head-tok), **seed 7** | ansar-main-seed7 | 59.73 / 60.11 s (base 95.76 / 88.21) | 1037 MiB | 1.535× / 13.84× | +0.000% | 10/10, kernels 11.7%, pytest 129 passed |
