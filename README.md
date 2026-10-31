@@ -4,10 +4,10 @@
 
 **Qwen2.5-1.5B fine-tunes in 505 MiB of GPU memory instead of 14 345, with the same result**
 
-![memory](https://img.shields.io/badge/peak_GPU_memory-505_MiB_(28.4×_less)-E8833A?style=for-the-badge)
-![speed](https://img.shields.io/badge/time-58.4_s_vs_86.1_s_(1.48×)-7FB0F0?style=for-the-badge)
-![checks](https://img.shields.io/badge/check__rules-10%2F10_PASS-78C88C?style=for-the-badge)
-![eval](https://img.shields.io/badge/eval_loss-−0.003%25_vs_base-12192B?style=for-the-badge)
+![memory](https://img.shields.io/badge/peak_GPU_memory-505_MiB_(28.4×_less)-FF6B35?style=for-the-badge&logo=nvidia&logoColor=white)
+![speed](https://img.shields.io/badge/time-58.4_s_vs_86.1_s_(1.48×)-3B82F6?style=for-the-badge&logo=lightning&logoColor=white)
+![checks](https://img.shields.io/badge/check__rules-10%2F10_PASS-22C55E?style=for-the-badge&logo=githubactions&logoColor=white)
+![eval](https://img.shields.io/badge/eval_loss-−0.003%25_vs_base-8B5CF6?style=for-the-badge&logo=pytorch&logoColor=white)
 
 [Kaggle notebook](https://www.kaggle.com/code/adiletzholdasbek/notebook659c3b6e49) ·
 [Demo video](https://youtu.be/yW08Wo7Txa0) ·
@@ -16,7 +16,26 @@
 
 *Decentrathon 6.0 · Adilet · Dilya · Ansar · Akniyet*
 
+![Triton](https://img.shields.io/badge/Triton-own_kernels-0F172A?logo=openai&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-autograd-EE4C2C?logo=pytorch&logoColor=white)
+![Kaggle](https://img.shields.io/badge/Kaggle-T4-20BEFF?logo=kaggle&logoColor=white)
+![Qwen](https://img.shields.io/badge/Qwen2.5--1.5B-NF4_+_LoRA-6D28D9)
+
 </div>
+
+## At a glance
+
+| 🧠 Memory | ⚡ Speed | 🎯 Quality | ✅ Rules |
+|:---:|:---:|:---:|:---:|
+| **14 345 → 505 MiB**<br>28.4× less | **86.1 → 58.4 s**<br>1.48× faster | **eval −0.003%**<br>same adapter | **10 / 10 PASS**<br>own kernels 14.8% |
+
+```mermaid
+xychart-beta
+    title "Peak GPU memory, MiB: step by step"
+    x-axis ["Base", "fp16 + fused CE + NF4", "No padding + recompute", "Weights on CPU", "Layer inputs on CPU", "Table on CPU at load"]
+    y-axis "MiB" 0 --> 15000
+    bar [14345, 6343, 1739, 1077, 673, 505]
+```
 
 ---
 
