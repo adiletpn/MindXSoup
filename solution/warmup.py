@@ -11,6 +11,7 @@ The dummies only use zeros and ones, never the random generators, so dropout mas
 other random draw of the run stay as they were.
 """
 
+import os
 import sys
 import threading
 
@@ -103,6 +104,10 @@ def compile_example_swiglu():
 
 
 def _compile_all(jobs):
+    try:  # organizers (31.10): lowering this thread's OS priority is allowed; Linux: per thread
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+    except (AttributeError, OSError):
+        pass
     for job in jobs:
         try:
             job()

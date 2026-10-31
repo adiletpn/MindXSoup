@@ -18,8 +18,7 @@ from .rmsnorm import patch_qwen2_rmsnorm
 from .rope import patch_rope
 from .startup import (cache_package_distributions, convert_dtype_on_gpu_at_load,
                       import_bitsandbytes_without_compile_wrappers,
-                      shrink_cuda_stack, skip_unused_optional_imports,
-                      tokenize_sft_rows_without_map)
+                      shrink_cuda_stack, skip_unused_optional_imports)
 from .head_stream import patch_head_stream
 from .stream import patch_stream_layers
 from .swiglu import patch_qwen2_mlp
@@ -76,7 +75,6 @@ def apply():
     if FEATURES["startup_cache"]:
         cache_package_distributions()  # before trl, imported further down
         skip_unused_optional_imports()  # before the patches below import transformers' models
-        tokenize_sft_rows_without_map()
         shrink_cuda_stack()  # takes effect on the first training step (fused_ce.py)
         convert_dtype_on_gpu_at_load()
     if FEATURES["example_swiglu"]:
