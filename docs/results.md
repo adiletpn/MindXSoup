@@ -96,3 +96,5 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **31.10 int8 backward dX bench (T4, tools/bench_int8.py, mindx-int8-bench).** _int_mm vs fp16 at M=1168: q/o x1.35, k/v x1.12, gate/up x1.27, down x1.55; at M=2048 down x0.95. With ideal fused quantize/rescale passes (memory bound): net x0.70–1.26, about 0.7 ms per layer per step, ≈ 1 s per run at best. Not taken: too little for the accuracy change and the new code.
 
 **31.10 head-offload (two walks, before the copy-stream fix), mindx-head-full:** 57.26/57.46 s, **1187 MiB (12.09x)**, but checks 5-7 FAIL: first step 0.01%, mean loss +5.3/6.0%, entropy 8.4%, eval +2.2%. Cause: a new walk over the vocabulary started copying into buffers the compute stream was still reading (fixed: the first copies wait for the compute stream). Not taken as is.
+
+**31.10 head-tok (one walk + tok + stack + fp16 inputs), mindx-headtok-full:** 37.8/37.9 s, 949 MiB, FAIL 5-7 (first step 0.01%, mean +4.6%, eval +3.9%): the fp16-input recompute had no tensor input requiring grad (the first layer input comes from the frozen embedding), so autograd skipped its backward. Fixed with an anchor input.
