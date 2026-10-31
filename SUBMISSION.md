@@ -5,7 +5,7 @@
 - Public Kaggle notebook, the saved version (`COMMIT` in it = the sha above; the same link is in
   the README): <KAGGLE_NOTEBOOK_URL>?scriptVersionId=<VERSION> _(set at submission)_
 - Demo video (up to 3 minutes): <VIDEO_URL> _(set at submission)_
-- Presentation: <PRESENTATION_URL> _(set at submission)_
+- Presentation (Google Slides): https://docs.google.com/presentation/d/1ZUFAPK-SZ9O0B_TGg1Jcfv7AfhCsYW89UhvK8JvVUTU
 
 ## Team (up to 4 people)
 | Name | Role | GitHub | Kaggle | Contact (captain) |
