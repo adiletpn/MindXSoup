@@ -22,7 +22,7 @@ import torch
 import triton
 import triton.language as tl
 
-SLICE = 8192   # vocabulary rows per slice: 8192 x 1536 fp16 = 24 MiB per buffer
+SLICE = 4096   # vocabulary rows per slice: 4096 x 1536 fp16 = 12 MiB per buffer
 BLOCK = 4096   # = fused_ce.VOCAB_BLOCK; SLICE is a multiple, so the block boundaries agree
 ONE_WALK = True  # gradient accumulated in the same walk (FlashAttention-style rescaling)
 

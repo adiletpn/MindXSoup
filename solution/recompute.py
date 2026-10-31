@@ -24,6 +24,7 @@ from . import stream, unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
 fp16_inputs = False  # set by patch_qwen2_layer_recompute(fp16_inputs=True)
+host_inputs = False  # set by patch_qwen2_layer_recompute(host=True): fp16 inputs wait in pinned host memory
 BUDGET_TOKENS = 256  # map 31.10 (one T4, empty Triton cache): 0 -> 63 s / 1 209 MiB, 256 -> 55 s / 1 603 MiB, 512 -> 54 s / 2 067 MiB
 
 
@@ -56,13 +57,19 @@ class Fp16InputCheckpoint(torch.autograd.Function):
         with torch.no_grad():
             out = run(hidden)
         scale = hidden.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(1.0) / 32768.0
-        ctx.save_for_backward((hidden.detach() / scale).to(torch.float16), scale)
+        half = (hidden.detach() / scale).to(torch.float16)
+        if host_inputs:  # copied on the compute stream; the GPU block is reused only after it
+            host = torch.empty(half.shape, dtype=half.dtype, pin_memory=True)
+            host.copy_(half, non_blocking=True)
+            half = host
+        ctx.save_for_backward(half, scale)
         ctx.dtype = hidden.dtype
         return out
 
     @staticmethod
     def backward(ctx, grad):
         half, scale = ctx.saved_tensors
+        half = half.to(ctx.device, non_blocking=True)
         hidden = (half.float() * scale).to(ctx.dtype).requires_grad_(True)
         enabled, dtype = ctx.autocast
         with torch.random.fork_rng(devices=[ctx.device]):
@@ -78,12 +85,13 @@ def _backward_begins(layer):
         stream.streamer().layer_begins(layer, forward=False)
 
 
-def patch_qwen2_layer_recompute(fp16=False):
+def patch_qwen2_layer_recompute(fp16=False, host=False):
     from transformers.models.qwen2 import modeling_qwen2
 
-    global enabled, fp16_inputs
+    global enabled, fp16_inputs, host_inputs
     enabled = True
     fp16_inputs = fp16
+    host_inputs = fp16 and host
     cls = modeling_qwen2.Qwen2DecoderLayer
     if getattr(cls, "_mindx_recompute", False):
         return

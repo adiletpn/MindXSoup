@@ -39,6 +39,7 @@ FEATURES = {
     "unpad": True,           # pad tokens never enter the decoder; attention per row
     "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
     "recompute_fp16_inputs": True,  # rerun layers keep their input as scaled fp16 rows, not fp32
+    "recompute_host_inputs": True,  # ... and those fp16 rows wait for backward in pinned host memory
     "stream_weights": True,  # decoder 4-bit weights in pinned host memory, one layer on the GPU at a time
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
@@ -97,7 +98,8 @@ def apply():
     if FEATURES["unpad"]:
         patch_unpad()  # used by the fused head's forward
     if FEATURES["recompute"]:
-        patch_qwen2_layer_recompute(fp16=FEATURES["recompute_fp16_inputs"])
+        patch_qwen2_layer_recompute(fp16=FEATURES["recompute_fp16_inputs"],
+                                    host=FEATURES["recompute_host_inputs"])
     if FEATURES["stream_weights"] and FEATURES["nf4"] and FEATURES["nf4_direct"]:
         patch_stream_layers()  # set up by the fused head's forward, before the first step
     if FEATURES["fp16_embedding"]:
