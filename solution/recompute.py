@@ -23,6 +23,7 @@ from torch.utils.checkpoint import checkpoint
 from . import stream, unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
+fp16_inputs = False  # set by patch_qwen2_layer_recompute(fp16_inputs=True)
 BUDGET_TOKENS = 256  # map 31.10 (one T4, empty Triton cache): 0 -> 63 s / 1 209 MiB, 256 -> 55 s / 1 603 MiB, 512 -> 54 s / 2 067 MiB
 
 
@@ -33,16 +34,53 @@ def layers_to_rerun(n_tokens, n_layers, budget=None):
     return min(n_layers, math.ceil(n_layers * (1.0 - budget / n_tokens)))
 
 
+class Fp16InputCheckpoint(torch.autograd.Function):
+    """Recompute a layer in backward from an fp16 copy of its fp32 input.
+
+    The input is the fp32 residual stream; keeping it only for the rerun, it is stored as fp16
+    rows scaled by one fp32 factor per row (so no value can overflow fp16), half the bytes of
+    torch.utils.checkpoint's fp32 copy. Backward rebuilds the fp32 input, reruns the layer under
+    the forward's autocast and random generator state (LoRA dropout draws the same masks), and
+    backpropagates through it. Organizers (31.10 11:27): a tensor kept only for backward may be
+    stored in fp16; the forward, the loss and the metrics are unchanged."""
+
+    @staticmethod
+    def forward(ctx, hidden, run):
+        ctx.run = run
+        ctx.autocast = (torch.is_autocast_enabled(), torch.get_autocast_gpu_dtype())
+        ctx.rng = torch.cuda.get_rng_state(hidden.device)
+        ctx.device = hidden.device
+        with torch.no_grad():
+            out = run(hidden)
+        scale = hidden.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(1.0) / 32768.0
+        ctx.save_for_backward((hidden.detach() / scale).to(torch.float16), scale)
+        ctx.dtype = hidden.dtype
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        half, scale = ctx.saved_tensors
+        hidden = (half.float() * scale).to(ctx.dtype).requires_grad_(True)
+        enabled, dtype = ctx.autocast
+        with torch.random.fork_rng(devices=[ctx.device]):
+            torch.cuda.set_rng_state(ctx.rng, ctx.device)
+            with torch.enable_grad(), torch.autocast("cuda", dtype=dtype, enabled=enabled):
+                out = ctx.run(hidden)
+            torch.autograd.backward(out, grad)
+        return hidden.grad, None
+
+
 def _backward_begins(layer):
     if stream.active():
         stream.streamer().layer_begins(layer, forward=False)
 
 
-def patch_qwen2_layer_recompute():
+def patch_qwen2_layer_recompute(fp16=False):
     from transformers.models.qwen2 import modeling_qwen2
 
-    global enabled
+    global enabled, fp16_inputs
     enabled = True
+    fp16_inputs = fp16
     cls = modeling_qwen2.Qwen2DecoderLayer
     if getattr(cls, "_mindx_recompute", False):
         return
@@ -78,6 +116,17 @@ def patch_qwen2_layer_recompute():
             with unpad.packed(*rows):
                 return original(self, hidden, *args, **kwargs)
 
+        if fp16_inputs and hidden_states.dtype == torch.float32:
+            form = {}
+
+            def run_tensor(hidden):  # the layer returns a tensor (a 1-tuple in older versions)
+                out = run(hidden)
+                form["tuple"] = isinstance(out, tuple)
+                return out[0] if form["tuple"] else out
+
+            hidden = Fp16InputCheckpoint.apply(hidden_states, run_tensor)
+            phase["forward"] = False
+            return (hidden,) if form["tuple"] else hidden
         out = checkpoint(run, hidden_states, use_reentrant=False, preserve_rng_state=True)
         phase["forward"] = False
         return out
