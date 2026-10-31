@@ -23,7 +23,7 @@ from torch.utils.checkpoint import checkpoint
 from . import stream, unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
-BUDGET_TOKENS = 0  # 0: every layer of every batch reruns (best score in our runs: 8.25x memory)
+BUDGET_TOKENS = 512  # layers kept for batches up to 512 tokens; longer ones rerun the rest (Dilya's map: 53 s at 2.07 GB vs 63 s at 1.21 GB)
 
 
 def layers_to_rerun(n_tokens, n_layers, budget=None):
@@ -31,6 +31,11 @@ def layers_to_rerun(n_tokens, n_layers, budget=None):
     if n_tokens <= budget:
         return 0
     return min(n_layers, math.ceil(n_layers * (1.0 - budget / n_tokens)))
+
+
+def _backward_begins(layer):
+    if stream.active():
+        stream.streamer().layer_begins(layer, forward=False)
 
 
 def patch_qwen2_layer_recompute():
@@ -52,9 +57,16 @@ def patch_qwen2_layer_recompute():
             getattr(getattr(attn, "config", None), "num_hidden_layers", None)
         if layer is None or n_layers is None or \
                 layer >= layers_to_rerun(hidden_states.shape[0] * hidden_states.shape[1], n_layers):
-            if layer is not None and stream.active():
-                stream.streamer().layer_begins(layer, forward=True)
-            return original(self, hidden_states, *args, **kwargs)
+            if layer is None or not stream.active():
+                return original(self, hidden_states, *args, **kwargs)
+            stream.streamer().layer_begins(layer, forward=True)
+            out = original(self, hidden_states, *args, **kwargs)
+            hidden = out[0] if isinstance(out, tuple) else out
+            if isinstance(hidden, torch.Tensor) and hidden.requires_grad:
+                # backward of this (not recomputed) layer starts when its output's gradient is
+                # ready: bring its weights in and prefetch the layers below, as recompute does
+                hidden.register_hook(lambda grad, layer=layer: _backward_begins(layer))
+            return out
         rows = unpad._rows
         phase = {"forward": True}  # the first call of run is the forward, later ones recompute
 
