@@ -13,7 +13,7 @@
 | Adilet | captain; core solution, kernels, integration, Kaggle runner | adiletpn | adiletzholdasbek | via the platform |
 | Dilya | RoPE kernel, fp16 attention path, per-row SDPA fix, wide NF4 kernel, one-kernel LoRA dropout, speed/memory ladder, final-candidate runs | meeexcv-lang | aqniet | |
 | Ansar | profiles, memory audits (peak owners), gate/up recompute, budget A/B, submission notebook | ansargabit99-boop | ansargabit | |
-| | presentation, video | aqnietqaysarbay-ctrl | | |
+| Akniyet Kaisarbai | presentation, video, submission audit | aqnietqaysarbay-ctrl | aqniet | |
 
 ## Our kernels
 | Kernel (`@triton.jit` name) | File | What it replaces | Share of the training time (check 4) |
@@ -43,7 +43,7 @@ commit differs only in documents). The notebook above re-runs it.
 | Peak GPU memory, MiB | 14 345 | 505 | base/ours 28.4× |
 | Eval loss (public rows) | 2.04964 | 2.04964 | 0.000% vs base |
 
-- [x] All 10 checks of `harness/check_rules.py` passed (every candidate run on 31.10; seeds 1, 7, 1234 earlier)
+- [x] All 10 checks of `harness/check_rules.py` passed on the final code (`73402c2` = `d0ef96f`): seed 1 on two machines and seed 7
 - [x] README.md rewritten for our solution: what we did, how to run it, results, limits
 
 ## Presentation covers

@@ -314,7 +314,7 @@ We wrote all code ourselves; these works gave the ideas:
 | Adilet | adiletpn | architecture, fused head + CE, fp16 MLP and embedding, NF4 and the direct 4-bit linear, RMSNorm, unpadding, recomputation, weight streaming, startup, Kaggle runner |
 | Dilya | meeexcv-lang | RoPE kernel, fp16 attention path (`qkv_rope_kernel`), per-row SDPA fix, wide NF4 unpack kernel, one-kernel LoRA dropout, speed/memory ladder, seed checks |
 | Ansar | ansargabit99-boop | baseline profile, memory audits of base and solution (peak owners), gate/up recompute, recompute budget A/B, startup probe, submission notebook |
-| | aqnietqaysarbay-ctrl | presentation, video |
+| Akniyet | aqnietqaysarbay-ctrl | presentation, video, submission audit |
 
 ## License
 
