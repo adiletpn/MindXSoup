@@ -7,16 +7,15 @@ lives in `solution/` and is switched on by `solution.apply()`.
 
 | Kaggle T4, `harness/run_task.py --repeats 2` | Base Soup | MindX | Ratio |
 |---|---|---|---|
-| Time of `soup train` | 83.5 s | **58.4 s** | **1.43× faster** |
-| Peak GPU memory (nvidia-smi, whole run) | 14 345 MiB | **1 209 MiB** | **11.87× less** |
-| Eval loss on the public rows | 2.04966 | 2.04966 | **+0.000%** |
+| Time of `soup train` | 89.3 s | **58.4 s** | **1.53× faster** |
+| Peak GPU memory (nvidia-smi, whole run) | 14 345 MiB | **1 077 MiB** | **13.32× less** |
+| Eval loss on the public rows | 2.04965 | 2.04967 | **+0.001%** |
 | Official checks (`harness/check_rules.py`) | | **10 / 10 PASS** | |
 
-Measured run of the `main` commit (31.10, 05:30). Our own Triton kernels take 11.6% of the training
-time (check 4 needs 5%). The training is the base's to the last digit of the eval loss, on every
-seed we ran (1, 7, 1234). We traded some speed for memory on purpose: the same code with the
-recomputation budget at 1 024 tokens runs in 49 s at 3.56 GB (1.78×, 4.03×), see
-[Results](#results).
+Measured run of commit `a0dfdee` (31.10, evening). Our own Triton kernels take 12.0% of the
+training time (check 4 needs 5%). The eval loss stays within ±0.005% of the base on every seed we
+ran (1, 7, 1234). We traded speed for memory on purpose: with recomputation off the same code runs
+in 48.6 s at 4.1 GB, see [Results](#results).
 
 **Public Kaggle notebook:** _link added at submission_ · Organizers' task description:
 [docs/CHALLENGE.md](docs/CHALLENGE.md)
@@ -39,19 +38,24 @@ Soup's fake test modules, other dtypes or shapes).
 | 5 | **Decoder weights live in pinned host memory.** Right after bitsandbytes quantizes a decoder weight while transformers loads the model, its packed NF4 bytes move to pinned host memory; the GPU keeps a 1-byte placeholder of the same shape. A ring of 3 GPU slots holds the layers in use: while layer i runs, a side CUDA stream copies layer i ± 2 (12.4 GB/s on the T4; a layer's 24 MiB take 2 ms, hidden behind its 4 ms of matmuls). Every 4-bit matmul asks for its bytes right before use, so correctness never depends on the prefetch. The loader's `caching_allocator_warmup` (a whole-model GPU reservation that only speeds up loading) is skipped. | `stream.py` | −0.53 GB, ~0 s |
 | 6 | **NF4 unpacking kernel and a direct 4-bit linear.** bitsandbytes dequantizes the double-quantized NF4 weights in two kernels (8-bit absmax, then the 4-bit values); ours does it in one pass. For fp16 inputs our `Linear4bit` path runs exactly bitsandbytes' own ops (unpack, `F.linear`; backward unpack, matmul) without its Python dispatch layers, bit-identical. | `nf4.py`, `linear4bit.py` | 8% of the step in our kernel |
 | 7 | **RMSNorm forward/backward kernel.** One launch each way instead of 5–6 PyTorch ops; keeps the input and `rstd`. | `rmsnorm.py` | fewer launches |
-| 8 | **Startup.** Triton compiles our kernels in a background thread while Soup loads the model (first step 4.6 → 0.8 s); `importlib.metadata.packages_distributions()` (2.3 s) is computed once instead of twice; the unused `sklearn` and `wandb` imports are skipped (≈3 s); `TORCHDYNAMO_DISABLE` is set only while bitsandbytes is imported, so it does not build `torch.compile` wrappers for its CPU backend (1.2 s); checkpoint tensors are converted bf16 → fp16 on the GPU instead of the CPU (same values). All allowed by the organizers in the participants' chat (30–31 Oct), all inside the measured run. | `warmup.py`, `startup.py` | ≈ −9 s |
+| 8 | **The tied embedding / `lm_head` table in pinned host memory.** The 445 MiB fp16 table leaves the GPU. The embedding lookup gathers the batch's rows on the host; the head walks the vocabulary in slices of 4 096 rows, each copied over PCIe into one of two GPU buffers while the previous one is used. Our `head_slice_kernel` carries each row's online-softmax state (running max, sum of exp, label logit, first argmax) from slice to slice in fp32 and, in the same walk, turns the slice into `exp(x − m)` so the hidden-state gradient is accumulated with FlashAttention-style rescaling: one pass over the table per step. Slice boundaries are multiples of the old kernel's block, so loss, entropy and argmax match it. | `head_stream.py` | −445 MiB |
+| 9 | **Cheaper recompute boundaries.** A rerun layer keeps its fp32 input as fp16 rows scaled by one fp32 factor per row (no overflow possible), and that copy waits for backward in pinned host memory. Layers that are not rerun keep the MLP's fp16 input instead of `gate` and `up` and redo those two matmuls in backward (same bytes, same kernels, no random draws). The token budget is 256: batches up to 256 real tokens rerun nothing. | `recompute.py`, `mlp_recompute.py` | −300 to −400 MiB, +2 s |
+| 10 | **LoRA dropout in one kernel.** The mask is drawn by PyTorch on the full padded shape exactly as in the base (same random numbers); our `lora_dropout_kernel` applies it to the real rows and writes the fp16 input of `lora_A` in one pass. | `unpad.py` | fewer launches |
+| 11 | **Startup.** Triton compiles our kernels in a background thread while Soup loads the model (first step 4.6 → 0.8 s); `importlib.metadata.packages_distributions()` (2.3 s) is computed once instead of twice; the unused `sklearn` and `wandb` imports are skipped (≈3 s); `TORCHDYNAMO_DISABLE` is set only while bitsandbytes is imported, so it does not build `torch.compile` wrappers for its CPU backend (1.2 s); checkpoint tensors are converted bf16 → fp16 on the GPU instead of the CPU (same values); the compile thread runs at `nice 19` so it does not take the CPU from training; the CUDA per-thread stack reservation is set to 256 B. All allowed by the organizers in the participants' chat (30–31 Oct), all inside the measured run. | `warmup.py`, `startup.py` | ≈ −9 s |
 
 ### Our kernels
 
-Share of the training time from the harness (CUDA events on our launches, steps 3–64, measured
-run of `main`, 31.10 05:30, lower of the two runs):
+Share of the training time from the harness (CUDA events on our launches, steps 3–64, run of
+`a0dfdee`; 12.0% in total):
 
 | Kernel (`@triton.jit`) | File | Replaces | Share |
 |---|---|---|---|
-| `nf4_unpack_kernel` | `solution/nf4.py` | bitsandbytes `dequantize_blockwise` + `dequantize_4bit` | 8.2–8.8% |
-| `rmsnorm_fwd_kernel`, `rmsnorm_bwd_kernel` | `solution/rmsnorm.py` | `Qwen2RMSNorm` (pow, mean, rsqrt, mul, cast; autograd of each) | 1.8% |
-| `qkv_rope_kernel` | `solution/attention.py` | LoRA add, RoPE and three fp16 casts of q/k/v, forward and backward | 1.0% |
-| `head_ce_rows_kernel` | `solution/fused_ce.py` | log-softmax, NLL, its gradient, TRL's entropy and argmax over 151 936 logits | 0.6% |
+| `nf4_unpack_wide_kernel` | `solution/nf4.py` | bitsandbytes `dequantize_blockwise` + `dequantize_4bit` | 7.8% |
+| `head_slice_kernel` | `solution/head_stream.py` | online softmax / CE / entropy / argmax and the gradient over vocabulary slices of the host table | 0.5% |
+| `lora_dropout_kernel` | `solution/unpad.py` | dropout of the LoRA input on the real rows + fp16 cast | 1.6% |
+| `rmsnorm_fwd_kernel`, `rmsnorm_bwd_kernel` | `solution/rmsnorm.py` | `Qwen2RMSNorm` (pow, mean, rsqrt, mul, cast; autograd of each) | 1.6% |
+| `qkv_rope_kernel` | `solution/attention.py` | LoRA add, RoPE and three fp16 casts of q/k/v, forward and backward | 0.8% |
+| `head_ce_rows_kernel` | `solution/fused_ce.py` | log-softmax, NLL, its gradient, TRL's entropy and argmax over 151 936 logits (used when the table is on the GPU) | — |
 | `rope_kernel` | `solution/rope.py` | `apply_rotary_pos_emb` (used when the fp16 attention path does not apply) | — |
 
 The organizers' example `example_swiglu_*` (`solution/swiglu.py`) is kept and runs inside our fp16
@@ -68,7 +72,7 @@ cuBLAS (Triton's `tl.dot` does not use the T4's tensor cores).
   recomputation restores the generator state; warm-up uses zeros only.
 - Weight streaming moves the same bytes; loading, the dtype conversion and the 4-bit linear path
   give bit-identical tensors (tested).
-- Tests (`python -m pytest solution -q`, 97 on a T4) compare every kernel and patch with PyTorch,
+- Tests (`python -m pytest solution -q`, 129+ on a T4) compare every kernel and patch with PyTorch,
   forward and backward, including a full Qwen2 training step padded vs. unpadded, with and without
   recomputation, streamed vs. resident 4-bit weights with constant eviction, a 4-bit model loaded
   with and without the load-time offload, and bit-identical results for the fp16 embedding.
@@ -145,7 +149,10 @@ single change was measured A/B on one machine where stated.
 | + bitsandbytes imported without compile wrappers | 87.9 → 49.3 | 3 561 | 2.04961 / 2.04966 | 1.78× | 4.03× | 10/10 |
 | + recomputation of every layer (budget 0) | 83.5 → 55.3 | 1 739 | 2.04968 / 2.04971 | 1.51× | 8.25× | 10/10 |
 | + decoder weights streamed from host memory | 83.2 → 55.8 | 1 413 | 2.04966 / 2.04967 | 1.49× | 10.15× | 10/10 |
-| **+ offload at load, GPU dtype conversion, head chunk 256 (`main`)** | 83.5 → 58.4 | **1 209** | **2.04966 / 2.04966** | **1.43×** | **11.87×** | **10/10** |
+| + offload at load, GPU dtype conversion, head chunk 256 | 83.5 → 58.4 | 1 209 | 2.04966 / 2.04966 | 1.43× | 11.87× | 10/10 |
+| budget 512, backward prefetch hints, one-kernel LoRA dropout | 88.3 → 50.8 | 2 067 | — (−0.001%) | 1.61× | 6.94× | 10/10 |
+| budget 256, wide NF4 kernel | 86.6 → 54.8 | 1 603 | — | 1.58× | 8.95× | 10/10 |
+| **+ embedding / head table in host memory, fp16 recompute inputs (`a0dfdee`)** | 89.3 → 58.4 | **1 077** | **2.04965 / 2.04967** | **1.53×** | **13.32×** | **10/10** |
 
 Same-machine A/B: the per-row SDPA fix alone gives −6.3 s and −1 000 MiB; the fp16 attention path
 −7% of the step time. Eval loss stays within ±0.005% of the base in every run.
@@ -161,15 +168,28 @@ the fp16 tied embedding / `lm_head` 0.45 GB, recompute boundaries (the layer inp
 - Tuned for this task: Qwen2 with SDPA attention, a T4 with fp16 autocast, NF4 with double
   quantization, right padding. Anything else takes the original code (correct, not faster); new
   sizes only compile again.
-- The step is now bound by cuBLAS matmuls; further speed needs fewer FLOPs, not faster
-  elementwise code.
-- We rerun every decoder layer in backward: one extra forward per step (about +6 s). A budget of
-  1 024 tokens gives 49 s at 3.56 GB instead; we chose memory because the score rewards the larger
-  relative gain.
+- The step is bound by cuBLAS matmuls and small launches; the next speed-up would be a fused NF4
+  unpack + matmul kernel (the weights are unpacked three times per step now) and fewer, larger
+  elementwise kernels.
+- Long batches rerun most decoder layers in backward (one extra forward of those layers); we chose
+  memory because the score rewards the larger relative gain.
 - Weight streaming relies on PCIe overlapping with compute; very short batches (fewer tokens than
   a layer's copy time covers) can wait for their weights.
-- The tied embedding / `lm_head` (445 MiB) is still on the GPU; it is now about a third of our
-  peak.
+- Removed after an organizers' ruling: tokenizing the SFT rows in our own loop (same tokens,
+  −1.8 s) is not allowed, because the dataset fingerprint then differs from Soup's `map`.
+
+**Tried and not taken** (numbers on a T4):
+
+| Idea | Result | Why not |
+|---|---|---|
+| Recomputation budget 512 instead of 256 | −3.2 s, +484 MiB | ≈ −0.5 points by the score formula |
+| Recomputation off | 48.6 s, 4 149 MiB | memory ×3.9 for −6 s |
+| Weight / table streaming off | −1.7 s, +1 450 MiB | memory cost far larger |
+| int8 tensor-core matmuls for backward | ≤ 1 s per run at best | too little for the accuracy change |
+| int8 forward | first-step loss off by > 1% on 10 of 64 batches | breaks check 6 |
+| Gated MLP in one kernel | 1 s slower than cuBLAS + SwiGLU | slower |
+| Head over the vocabulary in two walks | race between the copy stream and the second walk (fixed by an event; replaced by one walk) | — |
+| Varlen attention over the packed batch | no gain over per-row SDPA on the T4 | — |
 - On other data the speed-up depends on how much padding the batches have (43% here).
 
 ## Sources of ideas
@@ -188,6 +208,10 @@ We wrote all code ourselves; these works gave the ideas:
 - Padding-free / packed training with per-sequence attention (as in FlashAttention varlen),
   [arXiv:2205.14135](https://arxiv.org/abs/2205.14135).
 - Activation checkpointing, Chen et al., [arXiv:1604.06174](https://arxiv.org/abs/1604.06174).
+- Online softmax, Milakov & Gimelshein, [arXiv:1805.02867](https://arxiv.org/abs/1805.02867), and
+  FlashAttention's rescaled accumulation: the head over vocabulary slices in one walk.
+- ZeRO-Offload, Ren et al., [arXiv:2101.06840](https://arxiv.org/abs/2101.06840): keeping frozen
+  weights in host memory and streaming them to the GPU.
 - The organizers' Q&A and participants' chat (startup savings, background compilation, fp16
   storage of frozen weights), summarized in [docs/QA_NOTES.md](docs/QA_NOTES.md).
 
@@ -196,8 +220,8 @@ We wrote all code ourselves; these works gave the ideas:
 | | GitHub | Did |
 |---|---|---|
 | Adilet | adiletpn | architecture, fused head + CE, fp16 MLP and embedding, NF4 and the direct 4-bit linear, RMSNorm, unpadding, recomputation, weight streaming, startup, Kaggle runner |
-| Dilya | meeexcv-lang | RoPE kernel, fp16 attention path (`qkv_rope_kernel`), per-row SDPA fix, seed checks |
-| Ansar | ansargabit99-boop | baseline profile, memory audits of base and solution, startup probe, submission notebook |
+| Dilya | meeexcv-lang | RoPE kernel, fp16 attention path (`qkv_rope_kernel`), per-row SDPA fix, wide NF4 unpack kernel, one-kernel LoRA dropout, speed/memory ladder, seed checks |
+| Ansar | ansargabit99-boop | baseline profile, memory audits of base and solution (peak owners), gate/up recompute, recompute budget A/B, startup probe, submission notebook |
 | | aqnietqaysarbay-ctrl | presentation, video |
 
 ## License
