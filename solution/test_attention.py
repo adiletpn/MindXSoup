@@ -225,6 +225,7 @@ def test_qkv_rope_kernel_against_pytorch(n_tokens):
 
 def test_power_of_two_lora_scale_in_the_kernel_is_bit_exact():
     from solution.attention import qkv_rope
+    from solution.test_rope import model_like_cos_sin
 
     torch.manual_seed(1)
     batch, n_tokens = 2, 37
