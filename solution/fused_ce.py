@@ -25,7 +25,7 @@ import torch
 import triton
 import triton.language as tl
 
-from . import stream, unpad, warmup
+from . import head_stream, stream, unpad, warmup
 
 IGNORE_INDEX = -100
 CHUNK = 256          # rows per head matmul: 256 x 151936 fp16 logits = 78 MB
@@ -101,26 +101,33 @@ class FusedHeadCE(torch.autograd.Function):
         rows, width = hidden.shape[0] * hidden.shape[1], hidden.shape[-1]
         flat = hidden.reshape(rows, width)
         flat_target = target.reshape(rows).to(torch.int32).contiguous()
-        weight16 = weight.detach().to(torch.float16)  # what autocast feeds the base matmul
-        vocab = weight16.shape[0]
         with_grad = ctx.needs_input_grad[0]
-
-        token_loss = torch.empty(rows, dtype=torch.float32, device=hidden.device)
-        token_entropy = torch.empty(rows, dtype=torch.float32, device=hidden.device)
-        argmax = torch.empty(rows, dtype=torch.int32, device=hidden.device)
-        grad = torch.empty((rows, width), dtype=torch.float32, device=hidden.device) \
-            if with_grad else None
-        logits = torch.empty((min(CHUNK, rows), vocab), dtype=torch.float16, device=hidden.device)
-        with torch.autocast("cuda", enabled=False):  # dtypes are explicit here
-            for start in range(0, rows, CHUNK):
-                stop = min(start + CHUNK, rows)
-                buf = logits[: stop - start]
-                torch.mm(flat[start:stop].to(torch.float16), weight16.t(), out=buf)
-                launch_rows(buf, flat_target[start:stop], token_loss[start:stop],
-                            token_entropy[start:stop], argmax[start:stop], with_grad)
-                if with_grad:
-                    grad[start:stop] = torch.mm(buf, weight16).float()
-        del logits, weight16
+        table = head_stream.table_of(weight)
+        if table is not None:  # the weight lives in pinned host memory (head_stream.py)
+            with torch.autocast("cuda", enabled=False):
+                token_loss, token_entropy, argmax, grad = head_stream.head_ce(
+                    flat.to(torch.float16).contiguous(), table, flat_target, GRAD_SCALE,
+                    with_grad)
+        else:
+            weight16 = weight.detach().to(torch.float16)  # what autocast feeds the base matmul
+            vocab = weight16.shape[0]
+            token_loss = torch.empty(rows, dtype=torch.float32, device=hidden.device)
+            token_entropy = torch.empty(rows, dtype=torch.float32, device=hidden.device)
+            argmax = torch.empty(rows, dtype=torch.int32, device=hidden.device)
+            grad = torch.empty((rows, width), dtype=torch.float32, device=hidden.device) \
+                if with_grad else None
+            logits = torch.empty((min(CHUNK, rows), vocab), dtype=torch.float16,
+                                 device=hidden.device)
+            with torch.autocast("cuda", enabled=False):  # dtypes are explicit here
+                for start in range(0, rows, CHUNK):
+                    stop = min(start + CHUNK, rows)
+                    buf = logits[: stop - start]
+                    torch.mm(flat[start:stop].to(torch.float16), weight16.t(), out=buf)
+                    launch_rows(buf, flat_target[start:stop], token_loss[start:stop],
+                                token_entropy[start:stop], argmax[start:stop], with_grad)
+                    if with_grad:
+                        grad[start:stop] = torch.mm(buf, weight16).float()
+            del logits, weight16
 
         denominator = denominator.to(torch.float32)
         loss = token_loss.sum() / denominator
@@ -194,6 +201,8 @@ def patch_qwen2_causal_lm():
         warmup.wait()  # kernels compiled in the background while the model loaded
         if self.training and isinstance(self, torch.nn.Module):
             stream.setup(self)  # decoder weights to the host, once (stream.py)
+            if head_stream.enabled:
+                head_stream.offload_table(self)  # embedding / head table to the host, once
             unpad.tag_lora_dropouts(self)
         keep_all = logits_to_keep is None or (isinstance(logits_to_keep, int)
                                               and logits_to_keep == 0)

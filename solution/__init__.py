@@ -19,6 +19,7 @@ from .rope import patch_rope
 from .startup import (cache_package_distributions, convert_dtype_on_gpu_at_load,
                       import_bitsandbytes_without_compile_wrappers,
                       skip_unused_optional_imports)
+from .head_stream import patch_head_stream
 from .stream import patch_stream_layers
 from .swiglu import patch_qwen2_mlp
 from .unpad import patch_unpad
@@ -33,6 +34,7 @@ FEATURES = {
     "nf4_direct": True,      # Linear4bit: our unpack + F.linear directly, no bnb dispatch layers
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
+    "head_stream": True,     # ours: that fp16 table in pinned host memory, head by vocab slices
     "attention_fp16": True,  # ours (teammate): fp16 q/k/v, one kernel for LoRA sum + RoPE + cast
     "unpad": True,           # pad tokens never enter the decoder; attention per row
     "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
@@ -57,7 +59,8 @@ def _warmup_jobs():
     if FEATURES["example_swiglu"] or FEATURES["mlp_fp16"]:
         jobs.append(warmup.compile_example_swiglu)
     if FEATURES["fused_ce"]:
-        jobs.append(warmup.compile_head_ce)
+        jobs.append(warmup.compile_head_stream if FEATURES["head_stream"] and
+                    FEATURES["fp16_embedding"] else warmup.compile_head_ce)
     return jobs
 
 
@@ -97,3 +100,5 @@ def apply():
         patch_stream_layers()  # set up by the fused head's forward, before the first step
     if FEATURES["fp16_embedding"]:
         patch_fp16_embedding()  # after fused_ce: wraps whichever forward is in place
+        if FEATURES["head_stream"] and FEATURES["fused_ce"]:
+            patch_head_stream()
