@@ -49,7 +49,7 @@ Soup's fake test modules, other dtypes or shapes).
 ### Our kernels
 
 Share of the training time from the harness (CUDA events on our launches, steps 3–64; per kernel
-from the profiled run of `1d3b11e`, 12.0% in total; 12.8% in the final run):
+from the profiled run of `1d3b11e`, 12.0% in total; 13.1% in the final run):
 
 | Kernel (`@triton.jit`) | File | Replaces | Share |
 |---|---|---|---|
@@ -75,7 +75,7 @@ cuBLAS (Triton's `tl.dot` does not use the T4's tensor cores).
   recomputation restores the generator state; warm-up uses zeros only.
 - Weight streaming moves the same bytes; loading, the dtype conversion and the 4-bit linear path
   give bit-identical tensors (tested).
-- Tests (`python -m pytest solution -q`, 129+ on a T4) compare every kernel and patch with PyTorch,
+- Tests (`python -m pytest solution -q`, 135 on a T4) compare every kernel and patch with PyTorch,
   forward and backward, including a full Qwen2 training step padded vs. unpadded, with and without
   recomputation, streamed vs. resident 4-bit weights with constant eviction, a 4-bit model loaded
   with and without the load-time offload, and bit-identical results for the fp16 embedding.
@@ -98,7 +98,12 @@ organizer's answer covers a technique, it is cited here (rules: [docs/CHALLENGE.
 | Startup: one `packages_distributions()` scan, unused `sklearn`/`wandb` imports skipped, `TORCHDYNAMO_DISABLE` only while bitsandbytes is imported | QA 37, 45, 49; nothing stubbed in `sys.modules`, nothing reused between runs |
 | Decoder weights in pinned host memory, streamed per layer; loader warm-up reservation skipped | Rules, "Allowed: … offloading in your own code (its time counts)"; QA 47 (CPU offloading of frozen weights, copies and syncs in the measured time) |
 | bf16 → fp16 conversion of checkpoint tensors on the GPU at load | Same values (tested); QA 37 (startup work may be optimized inside the run) |
-| LoRA dropout | Same rate, same random masks as the base (drawn on the padded shape); QA 4 |
+| LoRA dropout | Same rate, same random masks as the base (drawn on the padded shape); QA 4, 60 |
+| Tied embedding / `lm_head` table in pinned host memory (put there at load), head over vocabulary slices with online softmax | QA 47 (own CPU offloading of the frozen table, head streamed in chunks), QA 70 (slice size, buffers, prefetch timing; only the summation order changes), QA 62 |
+| Recompute inputs kept as row-scaled fp16 in pinned host memory; MLP gate/up redone in backward | QA 6, 32 (compact storage of tensors kept for backward), QA 25, 67 (own recomputation), QA 47, 52 (own offloading) |
+| CUDA per-thread stack reservation set to 256 B | QA 59, 74 |
+| Compile thread at `nice 19` | QA 68 |
+| **Removed** after rulings: own SFT tokenization (`Dataset.from_list` instead of Soup's `map`), explicit `new_fingerprint` | QA 57, 68, 69 |
 
 ## How to run
 
