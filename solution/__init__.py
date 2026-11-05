@@ -34,6 +34,7 @@ FEATURES = {
     "fused_ce": True,        # ours: head + cross-entropy + metrics without full logits
     "nf4": True,             # ours: NF4 weight unpacking with fused double-dequant of absmax
     "nf4_direct": True,      # Linear4bit: our unpack + F.linear directly, no bnb dispatch layers
+    "nf4_cache_fp16": False,  # each NF4 weight unpacked once and kept in fp16 (speed profile)
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
     "head_stream": True,     # ours: that fp16 table in pinned host memory, head by vocab slices
@@ -97,7 +98,7 @@ def apply():
     if FEATURES["nf4"]:
         patch_bnb_nf4()
         if FEATURES["nf4_direct"]:
-            patch_bnb_linear4bit()
+            patch_bnb_linear4bit(cache_weights=FEATURES["nf4_cache_fp16"])
     if FEATURES["rope"]:
         patch_rope()
     if FEATURES["attention_fp16"]:

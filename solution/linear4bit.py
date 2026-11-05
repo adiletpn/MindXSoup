@@ -151,12 +151,21 @@ def _cached_weight(layer, x):
 def patch_bnb_linear4bit(cache_weights=False):
     import bitsandbytes as bnb
 
+    global cache_fp16
+    cache_fp16 = cache_weights
     cls = bnb.nn.Linear4bit
     if getattr(cls, "_mindx_direct", False):
         return
     original = cls.forward
 
     def forward(self, x):
+        if cache_fp16:
+            weight16 = _cached_weight(self, x)
+            if weight16 is not None:
+                bias = self.bias
+                if bias is not None and bias.dtype != x.dtype:  # what Linear4bit.forward does, once
+                    bias.data = bias.data.to(x.dtype)
+                return torch.nn.functional.linear(x, weight16, bias)
         if isinstance(x, torch.Tensor) and x.is_cuda and stream.offloaded(self):
             return _streamed_forward(self, x)
         if not _direct_ok(self, x):
