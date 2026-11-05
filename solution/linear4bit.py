@@ -15,7 +15,7 @@ import contextlib
 
 import torch
 
-from . import stream
+from . import direct, stream
 from .nf4 import _supported, unpack_nf4
 
 _enabled = True
@@ -93,7 +93,7 @@ def _streamed_forward(layer, x):
         if bias.dtype != x.dtype:
             bias.data = bias.data.to(x.dtype)
         bias = bias.to(layer.compute_dtype)
-    return NF4StreamFunction.apply(x, layer, layer.weight.quant_state, bias).to(inp_dtype)
+    return direct.run(NF4StreamFunction, x, layer, layer.weight.quant_state, bias).to(inp_dtype)
 
 
 def _bnb_picks_fused_kernel(x, state):
@@ -147,7 +147,7 @@ def patch_bnb_linear4bit():
                 bias.data = bias.data.to(x.dtype)
             bias = bias.to(self.compute_dtype)
         packed = self.weight.data.view(-1, 1)  # canonical [(N*K+1)//2, 1], as MatMul4Bit uses
-        return NF4LinearFunction.apply(x, packed, self.weight.quant_state, bias)
+        return direct.run(NF4LinearFunction, x, packed, self.weight.quant_state, bias)
 
     cls.forward = forward
     cls._mindx_direct = True
