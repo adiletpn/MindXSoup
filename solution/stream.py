@@ -149,29 +149,43 @@ class LayerStreamer:
         return id(module) in self.entries
 
 
-def offload(param):
-    """Move a quantized Params4bit's packed bytes to pinned host memory, once; a 1-byte placeholder
-    of the same shape and dtype stays on the GPU, so the module still looks like a CUDA weight."""
+def offload(param, pin=True):
+    """Move a quantized Params4bit's packed bytes and 8-bit block scales to pinned host memory,
+    once; 1-byte placeholders of the same shapes stay on the GPU, so the module still looks like a
+    CUDA weight."""
     if hasattr(param, "_mindx_host"):
         return
     data = param.data
-    host = torch.empty(data.numel(), dtype=torch.uint8, pin_memory=True)
+    host = torch.empty(data.numel(), dtype=torch.uint8, pin_memory=pin)
     host.copy_(data.reshape(-1))
     param._mindx_host, param._mindx_shape = host, tuple(data.shape)
     param.data = torch.empty(1, dtype=torch.uint8, device=data.device).expand(data.shape)
+    state = param.quant_state
+    absmax = state.absmax
+    param._mindx_absmax = torch.empty(absmax.numel(), dtype=torch.uint8, pin_memory=pin)
+    param._mindx_absmax.copy_(absmax.reshape(-1))
+    state.absmax = torch.empty(1, dtype=torch.uint8, device=absmax.device).expand(absmax.shape)
 
 
 def offloaded(module):
     return hasattr(getattr(module, "weight", None), "_mindx_host")
 
 
-def packed_for(module):
-    """The module's packed NF4 bytes on the GPU: from the streamer's slots, or (before the
-    streamer exists, e.g. a forward before training) a one-off synchronous copy."""
+def bytes_for(module):
+    """The module's packed NF4 bytes and block scales on the GPU: from the streamer's slots, or
+    (before the streamer exists, e.g. a forward before training) a one-off synchronous copy."""
     if _streamer is not None and _streamer.owns(module):
-        return _streamer.packed_for(module)
+        return _streamer.bytes_for(module)
     weight = module.weight
-    return weight._mindx_host.to(weight.device).view(weight._mindx_shape)
+    return (weight._mindx_host.to(weight.device).view(weight._mindx_shape),
+            weight._mindx_absmax.to(weight.device))
+
+
+def weight_for(module):
+    """The module's weight already unpacked for the running layer, or None."""
+    if _streamer is not None and _streamer.owns(module):
+        return _streamer.weight_for(module)
+    return None
 
 
 def active():
