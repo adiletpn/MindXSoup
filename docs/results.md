@@ -141,3 +141,9 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **4.11 rules_mid (no layer rerun, weights and table on the host), mindx-fl-mid1, one run: 45.42 s vs base 76.5 (1.684x), 3085 MiB (4.65x), eval 0.0%, 10/10.**
 
 **4.11 same-machine A/B, group 1024, order A B C C B A, mindx-fl-ab1 (solution only, one T4).** A plain: 62.27 / 61.52 s, 387 MiB. B AdamW moments on the host: 60.41 / 61.83 s, 381 MiB. C cuBLAS workspace :4096:1: 66.09 / 65.94 s, 379 MiB (median step x1.165). AdamW on the host taken (-6 MiB, no measurable time cost); the smaller workspace not taken (-8 MiB, +4.2 s).
+
+
+### A/B на одной машине: прямой проход, новые кернелы, причинность (floor-all, вне сданного коммита)
+
+- ab2, group 1024, все 381 MiB, 154 теста: без правок 57.21 / 60.36 с; прямой первый проход 59.56 / 60.17 с; плюс `layer_input` и `head_acc` 59.71 / 59.72 с. Выигрыша нет, разница в пределах шума.
+- ab3, задержка 100 мкс на CPU перед каждой распаковкой NF4 (630 запусков на шаг, ожидание +4.03 с): `rules_balanced` 60.21 / 59.12 / 58.11 с, цикл 40.81 / 39.98 / 39.26 с; с задержкой 63.93 / 62.27 / 61.96 с, цикл 44.63 / 43.25 / 43.14 с. Цикл +3.65 с, общее время +3.57 с: около 90% задержки проходит насквозь, GPU в этих местах ждёт CPU.
