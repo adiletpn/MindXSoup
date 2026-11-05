@@ -61,7 +61,9 @@ def _warmup_jobs():
         jobs.append(compile_qkv_rope)
     elif FEATURES["rope"]:  # with the fp16 attention path, q/k are rotated by qkv_rope_kernel
         jobs.append(warmup.compile_rope)
-    if FEATURES["example_swiglu"] or FEATURES["mlp_fp16"]:
+    if FEATURES["mlp_fp16"]:  # the fp16 MLP calls our silu_mul; the example's MLP is replaced
+        jobs.append(warmup.compile_silu_mul)
+    elif FEATURES["example_swiglu"]:
         jobs.append(warmup.compile_example_swiglu)
     if FEATURES["fused_ce"]:
         jobs.append(warmup.compile_head_stream if FEATURES["head_stream"] and
