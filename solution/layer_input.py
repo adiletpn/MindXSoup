@@ -30,3 +30,35 @@ def layer_input_restore_kernel(half_ptr, scale_ptr, x_ptr, COLS: tl.constexpr,
     mask = cols < COLS
     half = tl.load(half_ptr + row * COLS + cols, mask=mask, other=0.0).to(tl.float32)
     tl.store(x_ptr + row * COLS + cols, half * tl.load(scale_ptr + row), mask=mask)
+
+
+def _config(cols):
+    block = triton.next_power_of_2(cols)
+    return block, (8 if block >= 2048 else 4)
+
+
+def pack(hidden):
+    """hidden: [1, N, cols] fp32 -> (half [1, N, cols] fp16, scale [1, N, 1] fp32)."""
+    x = hidden.detach().contiguous()
+    half = torch.empty_like(x, dtype=torch.float16)
+    scale = torch.empty((1, x.shape[1], 1), dtype=torch.float32, device=x.device)
+    block, warps = _config(x.shape[2])
+    layer_input_pack_kernel[(x.shape[1],)](x, half, scale, COLS=x.shape[2], BLOCK=block,
+                                           num_warps=warps)
+    return half, scale
+
+
+def restore(half, scale):
+    """half on the GPU, contiguous: the fp32 input back."""
+    x = torch.empty_like(half, dtype=torch.float32)
+    block, warps = _config(half.shape[2])
+    layer_input_restore_kernel[(half.shape[1],)](half, scale, x, COLS=half.shape[2], BLOCK=block,
+                                                 num_warps=warps)
+    return x
+
+
+enabled = True  # set by apply()
+
+
+def fits(hidden):
+    return enabled and hidden.dim() == 3 and hidden.shape[0] == 1 and hidden.dtype == torch.float32
