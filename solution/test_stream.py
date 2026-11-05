@@ -94,9 +94,11 @@ def test_streamed_is_bit_identical(hints, slots, coalesce, monkeypatch):
         assert len(stream._streamer.host_layers) == (len(groups) if coalesce else 0)
         for group, host in zip(groups, stream._streamer.host_layers):
             assert host.is_pinned()
-            assert host.numel() == sum(m.weight._mindx_host.numel() for m in group)
+            assert host.numel() == sum(m.weight._mindx_host.numel()
+                                       + m.weight._mindx_absmax.numel() for m in group)
             assert all(m.weight._mindx_host.untyped_storage().data_ptr()
                        == host.untyped_storage().data_ptr() for m in group)
+            assert all(m.weight.quant_state.absmax.untyped_storage().nbytes() == 1 for m in group)
         got = run(model, hints)
         got2 = run(model, hints)  # a second step reuses the host copies
     finally:
