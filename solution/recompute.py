@@ -26,6 +26,7 @@ enabled = False  # set by patch_qwen2_layer_recompute()
 fp16_inputs = False  # set by patch_qwen2_layer_recompute(fp16_inputs=True)
 host_inputs = False  # set by patch_qwen2_layer_recompute(host=True): fp16 inputs wait in pinned host memory
 BUDGET_TOKENS = 0  # every layer reruns; 31.10 evening, one T4, host inputs: 0 -> 59.2 s / 675 MiB, 256 -> 58.3 s / 957 MiB
+GROUP_TOKENS = 0  # > 0: a rerun layer runs its rows in groups of at most this many tokens (a longer row alone)
 
 
 def layers_to_rerun(n_tokens, n_layers, budget=None):
@@ -35,6 +36,28 @@ def layers_to_rerun(n_tokens, n_layers, budget=None):
     return min(n_layers, math.ceil(n_layers * (1.0 - budget / n_tokens)))
 
 
+def row_groups(lengths, cap):
+    """Consecutive rows packed in order into groups of at most `cap` tokens; a longer row is a
+    group of its own. Returns (first row, end row, first token, end token) per group."""
+    groups = []
+    row, token = 0, 0
+    while row < len(lengths):
+        end, stop = row + 1, token + lengths[row]
+        while end < len(lengths) and stop - token + lengths[end] <= cap:
+            stop += lengths[end]
+            end += 1
+        groups.append((row, end, token, stop))
+        row, token = end, stop
+    return groups
+
+
+def _slice_tokens(value, start, stop, n):
+    """A layer argument with one group's tokens: tensors [_, N, ...], also inside tuples."""
+    if isinstance(value, torch.Tensor):
+        return value[:, start:stop] if value.dim() >= 2 and value.shape[1] == n else value
+    if isinstance(value, tuple):
+        return tuple(_slice_tokens(item, start, stop, n) for item in value)
+    return value
 class Fp16InputCheckpoint(torch.autograd.Function):
     """Recompute a layer in backward from an fp16 copy of its fp32 input.
 
