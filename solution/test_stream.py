@@ -110,6 +110,56 @@ def test_streamed_is_bit_identical(hints, slots, coalesce, layer_unpack, monkeyp
         assert all(torch.equal(x, y) for x, y in zip(a[2], b[2]))
 
 
+def test_layer_unpack_gives_each_weights_own_bits(monkeypatch):
+    from solution import linear4bit, stream
+    from solution.nf4 import patch_bnb_nf4
+
+    monkeypatch.setattr(stream, "LAYER_UNPACK", True)
+    patch_bnb_nf4()
+    linear4bit.patch_bnb_linear4bit()
+    model = blocks(3)
+    for module in model.modules():
+        if hasattr(module, "compute_type_is_set"):
+            module.compute_type_is_set = True
+    run(model, hints=False)  # the first forward sets up the modules' states
+    groups = [[b.q, b.up, b.down] for b in model]
+    expected = {id(m): linear4bit._unpack(m.weight.data.view(-1, 1), m.weight.quant_state,
+                                          torch.float16)
+                for g in groups for m in g}
+    try:
+        streamer = stream._streamer = stream.LayerStreamer(groups, slots=2)
+        assert streamer.layer_tables is not None
+        assert all(stream.weight_for(m) is None for g in groups for m in g)
+        for i in (0, 2, 1, 1):
+            streamer.layer_begins(i, forward=True)
+            for layer, group in enumerate(groups):
+                for module in group:
+                    weight = stream.weight_for(module)
+                    if layer == i:
+                        assert torch.equal(weight, expected[id(module)])
+                    else:
+                        assert weight is None
+    finally:
+        stream._streamer = None
+
+
+def test_layer_unpack_needs_equal_layers(monkeypatch):
+    from solution import linear4bit, stream
+    from solution.nf4 import patch_bnb_nf4
+
+    monkeypatch.setattr(stream, "LAYER_UNPACK", True)
+    patch_bnb_nf4()
+    linear4bit.patch_bnb_linear4bit()
+    groups = [[nf4_linear(512, 512, False)], [nf4_linear(512, 1024, False)]]
+    try:
+        streamer = stream._streamer = stream.LayerStreamer(groups, slots=2)
+        assert streamer.layer_tables is None
+        streamer.layer_begins(0, forward=True)
+        assert stream.weight_for(groups[0][0]) is None
+    finally:
+        stream._streamer = None
+
+
 def test_setup_skips_models_it_cannot_stream():
     from solution import stream
 
