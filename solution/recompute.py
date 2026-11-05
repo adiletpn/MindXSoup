@@ -20,7 +20,7 @@ import math
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from . import stream, unpad
+from . import dropout, layer_input, stream, unpad
 
 enabled = False  # set by patch_qwen2_layer_recompute()
 fp16_inputs = False  # set by patch_qwen2_layer_recompute(fp16_inputs=True)
@@ -56,8 +56,11 @@ class Fp16InputCheckpoint(torch.autograd.Function):
         ctx.device = hidden.device
         with torch.no_grad():
             out = run(hidden)
-        scale = hidden.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(1.0) / 32768.0
-        half = (hidden.detach() / scale).to(torch.float16)
+        if layer_input.fits(hidden):
+            half, scale = layer_input.pack(hidden)
+        else:
+            scale = hidden.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(1.0) / 32768.0
+            half = (hidden.detach() / scale).to(torch.float16)
         if host_inputs:  # copied on the compute stream; the GPU block is reused only after it
             host = torch.empty(half.shape, dtype=half.dtype, pin_memory=True)
             host.copy_(half, non_blocking=True)
@@ -70,7 +73,11 @@ class Fp16InputCheckpoint(torch.autograd.Function):
     def backward(ctx, grad):
         half, scale = ctx.saved_tensors
         half = half.to(ctx.device, non_blocking=True)
-        hidden = (half.float() * scale).to(ctx.dtype).requires_grad_(True)
+        if layer_input.enabled and ctx.dtype == torch.float32 and half.dim() == 3 \
+                and half.shape[0] == 1:
+            hidden = layer_input.restore(half, scale).requires_grad_(True)
+        else:
+            hidden = (half.float() * scale).to(ctx.dtype).requires_grad_(True)
         enabled, dtype = ctx.autocast
         with torch.random.fork_rng(devices=[ctx.device]):
             torch.cuda.set_rng_state(ctx.rng, ctx.device)
