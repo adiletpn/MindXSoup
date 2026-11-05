@@ -70,6 +70,13 @@ def compile_head_ce():
     launch_rows(logits, target, loss, entropy, argmax, with_grad=True)
 
 
+def compile_layer_input():
+    from .layer_input import pack, restore
+
+    half, scale = pack(torch.zeros(1, 2, HIDDEN, device="cuda"))
+    restore(half, scale)
+
+
 def compile_nf4():
     from .nf4 import BYTES_PER_PROGRAM, unpack_nf4
 

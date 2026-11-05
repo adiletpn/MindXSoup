@@ -66,6 +66,8 @@ def _warmup_jobs():
         jobs.append(warmup.compile_silu_mul)
     elif FEATURES["example_swiglu"]:
         jobs.append(warmup.compile_example_swiglu)
+    if FEATURES["recompute"] and FEATURES["recompute_fp16_inputs"]:
+        jobs.append(warmup.compile_layer_input)
     if FEATURES["fused_ce"]:
         jobs.append(warmup.compile_head_stream if FEATURES["head_stream"] and
                     FEATURES["fp16_embedding"] else warmup.compile_head_ce)
