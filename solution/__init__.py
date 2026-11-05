@@ -58,6 +58,7 @@ FEATURES = {
     "recompute_group_tokens": 512,  # ... and rerun layers run their rows in groups of this many tokens
     "recompute_no_rerun": False,  # the layer hook only gives the streamer its hints, nothing reruns
     "offload_activations": False,  # instead of rerunning, layers' saved tensors wait in pinned host memory
+    "layer_unpack": False,   # all 7 weights of the running layer unpacked by one launch, kept until the next layer
     "stream_weights": True,  # decoder 4-bit weights in pinned host memory, one layer on the GPU at a time
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
@@ -89,6 +90,8 @@ def _warmup_jobs():
         jobs.append(warmup.compile_rmsnorm)
     if FEATURES["nf4"]:
         jobs.append(warmup.compile_nf4)
+        if FEATURES["layer_unpack"]:
+            jobs.append(warmup.compile_nf4_layer)
     if FEATURES["unpad"]:
         jobs.append(warmup.compile_lora_dropout)
     if FEATURES["attention_fp16"]:

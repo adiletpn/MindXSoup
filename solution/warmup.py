@@ -94,6 +94,20 @@ def compile_nf4():
                absmax_8bit=absmax_8bit, code=code, offset=offset)
 
 
+def compile_nf4_layer():
+    from .nf4 import WIDE_BLOCKS, launch_layer
+
+    n_bytes = WIDE_BLOCKS * 32
+    launch_layer(torch.zeros(n_bytes, dtype=torch.uint8, device="cuda"),
+                 torch.empty(2 * n_bytes, dtype=torch.float16, device="cuda"),
+                 torch.zeros(WIDE_BLOCKS, dtype=torch.uint8, device="cuda"),
+                 torch.zeros(256, device="cuda"), torch.ones(1, device="cuda"),
+                 torch.zeros(1, device="cuda"),
+                 torch.zeros(1, dtype=torch.int8, device="cuda"),
+                 torch.zeros(1, dtype=torch.int32, device="cuda"),
+                 torch.zeros(1, dtype=torch.int32, device="cuda"))
+
+
 def compile_lora_dropout():
     from .dropout import KeptDropout, PackedDropout
 
