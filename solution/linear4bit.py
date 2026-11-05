@@ -32,10 +32,11 @@ def disabled():
         _enabled = previous
 
 
-def _unpack(packed, state, dtype):
+def _unpack(packed, state, dtype, absmax_8bit=None):
     """The fp16 [N, K] weight, as bitsandbytes' fallback and dequantize_4bit produce it."""
     return unpack_nf4(packed, state.shape, state.state2.absmax, state.blocksize, dtype,
-                      absmax_8bit=state.absmax, code=state.state2.code, offset=state.offset)
+                      absmax_8bit=state.absmax if absmax_8bit is None else absmax_8bit,
+                      code=state.state2.code, offset=state.offset)
 
 
 class NF4LinearFunction(torch.autograd.Function):
@@ -55,6 +56,15 @@ class NF4LinearFunction(torch.autograd.Function):
         return grad_x, None, None, None
 
 
+def streamed_weight(module, state):
+    """The module's fp16 weight: from the running layer's buffer, or unpacked from its bytes."""
+    weight = stream.weight_for(module)
+    if weight is not None:
+        return weight
+    packed, absmax = stream.bytes_for(module)
+    return _unpack(packed, state, state.dtype, absmax)
+
+
 class NF4StreamFunction(torch.autograd.Function):
     """NF4LinearFunction for a module whose bytes live on the host (stream.py): the bytes are
     asked for right before each use, in forward and again in backward."""
@@ -62,16 +72,13 @@ class NF4StreamFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, module, state, bias):
         ctx.module, ctx.state = module, state
-        packed = stream.packed_for(module)
-        return torch.nn.functional.linear(x, _unpack(packed, state, x.dtype), bias)
+        return torch.nn.functional.linear(x, streamed_weight(module, state).to(x.dtype), bias)
 
     @staticmethod
     def backward(ctx, grad):
         grad_x = None
         if ctx.needs_input_grad[0]:
-            packed = stream.packed_for(ctx.module)
-            grad_x = torch.matmul(grad, _unpack(packed, ctx.state, ctx.state.dtype)
-                                  .to(grad.dtype))
+            grad_x = torch.matmul(grad, streamed_weight(ctx.module, ctx.state).to(grad.dtype))
         return grad_x, None, None, None
 
 
