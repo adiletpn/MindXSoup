@@ -119,3 +119,25 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **31.10 23:00 public Kaggle notebook adiletzholdasbek/notebook659c3b6e49, COMMIT d0ef96f: ALL CHECKS PASSED.** base 86.13 s / 14 345 MiB, solution 58.37 s / 505 MiB, **1.476x**, memory 28.406x, eval −0.003%, own kernels 14.8%.
 
 **31.10 SwiGLU in-place A/B (branch swiglu-inplace c8b5a1f vs final-500, aqniet/dilya-swiglu-ab, one T4, alternating):** base 67.59/60.42 s, 505 MiB (torch 343.3); new 60.08/60.62 s, **485 MiB** (torch 329.1); eval 2.04964-2.04965 both; 142 tests passed. −20 MiB (−4%), time within noise. Not taken (below the 5% threshold, after the code freeze).
+
+**4.11 floor-all, first runs (one run each, not --repeats 2; rules unless noted).** rules_time (NF4 weights cached in fp16): 42.35 s vs base 77.79 (1.837x), 6793 MiB, 10/10, own kernels 8.6%; with the packed bytes moved to host 44.16 s vs base 81.04 (1.835x), 6125 MiB, 10/10. Grouped layer rerun (rows of a rerun layer run in groups, with in-place SwiGLU and the block scales streamed): group 512: 91.06 s vs base 80.79, 429 MiB, check 8 FAIL. group 1024: 64.64 s vs 80.54, 449 MiB, 10/10; plus head buffers, dropout ones and the head gradient released through backward: **62.02 s vs 78.08 (1.259x), 409 MiB (35.07x), eval -0.001%, 10/10**. group 768 with the same release: 80.01 s vs 81.37, 389 MiB, 10/10.
+
+**4.11 T4 benches (tools/floor_bench.py, mindx-fl-gemm).** Backward GEMM with W column-major: slower or equal to row-major. Padding N to a multiple, splitting a GEMM into pieces: no consistent gain. Context 107 MiB, first GEMM +12 MiB, SDPA +8, Triton +6 (133 MiB). Dropout draws from fp16 or expanded ones differ from fp32 ones, so a fresh fp32 buffer is the cheapest legal draw.
+
+**4.11 whole-step microbatch (groups of 512 tokens, no layer rerun; idea from docs/PERF_ANALYSIS_INDEPENDENT.md), mindx-fl-ml1 / mf1.** Weights and table on the host: 72.09 s vs base 77.32, 1141 MiB, checks 10/10. Weights and table on the GPU: 58.38 s vs base 79.58, 2675 MiB, checks 10/10. Own test of the LoRA gradients against the whole batch failed at rtol 1e-4 (cause not established). Worse than the grouped rerun at 62 s / 409 MiB; code removed.
+
+**4.11 int8 forward (same document): not built.** The 31.10 probe already shows the first-step loss over 1% on 10-55 of 64 batches, which breaks check 6.
+
+**4.11 PERF_IDEAS idea 1 (W^T stored row-major for gate/up), tools/bench_layout.py, mindx-fl-layout, one session, two rounds:** forward -11...+13%, backward -12...+15% depending on N, no stable gain. Not built.
+
+**4.11 PERF_IDEAS idea 2 (a rerun MLP skips down_proj and SwiGLU forward; group 1024), mindx-fl-tail1:** 60.06 s vs base 79.52 (1.324x), 389 MiB (36.88x), eval +0.001%, 10/10 (one run; 2 failures in pytest were a bug of the new test itself, fixed).
+
+**4.11 rules_balanced (group 1024 + dead-value MLP rerun), jury order --repeats 2, mindx-fl-bal-r2: 57.75 / 59.61 s vs base 75.94 / 78.38 (1.315x), 389 MiB (36.88x), eval +0.001%, 10/10.**
+
+**4.11 rules_balanced, seed 7, --repeats 2, mindx-fl-bal-s7: 61.74 / 61.67 s vs base 78.31 / 81.34 (1.294x), 407 MiB (35.26x), eval +0.002%, 10/10, 149 tests.**
+
+**4.11 rules_memory (group 512), seed 7, --repeats 2, mindx-fl-mem-s7: 80.33 / 82.04 s vs base 77.11 / 79.32 (0.963x), 349 MiB (41.12x), eval -0.001%, 10/10.**
+
+**4.11 rules_mid (no layer rerun, weights and table on the host), mindx-fl-mid1, one run: 45.42 s vs base 76.5 (1.684x), 3085 MiB (4.65x), eval 0.0%, 10/10.**
+
+**4.11 same-machine A/B, group 1024, order A B C C B A, mindx-fl-ab1 (solution only, one T4).** A plain: 62.27 / 61.52 s, 387 MiB. B AdamW moments on the host: 60.41 / 61.83 s, 381 MiB. C cuBLAS workspace :4096:1: 66.09 / 65.94 s, 379 MiB (median step x1.165). AdamW on the host taken (-6 MiB, no measurable time cost); the smaller workspace not taken (-8 MiB, +4.2 s).
