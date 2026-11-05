@@ -260,7 +260,8 @@ def patch_offload_at_load():
             if enabled and isinstance(result, dict):
                 for name, value in result.items():
                     if _offload_at_load(name, value):
-                        offload(value)
+                        # plain memory for now: LayerStreamer copies it once into pinned layer blocks
+                        offload(value, pin=not COALESCE_TRANSFERS)
             return result
 
         cls.convert = convert
