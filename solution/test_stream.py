@@ -74,11 +74,13 @@ def run(model, hints):
 @pytest.mark.parametrize("hints", [True, False])
 @pytest.mark.parametrize("slots", [1, 2, 3, 4])
 @pytest.mark.parametrize("coalesce", [True, False])
-def test_streamed_is_bit_identical(hints, slots, coalesce, monkeypatch):
+@pytest.mark.parametrize("layer_unpack", [True, False])
+def test_streamed_is_bit_identical(hints, slots, coalesce, layer_unpack, monkeypatch):
     from solution import linear4bit, stream
     from solution.nf4 import patch_bnb_nf4
 
     monkeypatch.setattr(stream, "COALESCE_TRANSFERS", coalesce)
+    monkeypatch.setattr(stream, "LAYER_UNPACK", layer_unpack)
     patch_bnb_nf4()
     linear4bit.patch_bnb_linear4bit()
     model = blocks()
