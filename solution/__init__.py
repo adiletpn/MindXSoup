@@ -6,7 +6,10 @@ any of them can be turned off in one line; every patch falls back to the origina
 it does not handle (CPU tensors, fake modules in Soup's tests, unexpected dtypes).
 """
 
-from . import warmup
+import os
+
+from . import direct, dropout, head_stream, layer_input, recompute, stream, warmup
+from .adam_host import patch_adam_host
 from .attention import compile_qkv_rope, patch_qwen2_attention_fp16
 from .embedding import patch_fp16_embedding
 from .fused_ce import patch_qwen2_causal_lm, patch_trl_metrics
@@ -30,6 +33,12 @@ FEATURES = {
     "startup_cache": True,   # CPU startup: no unused compile wrappers/sklearn/wandb, one metadata scan
     "example_swiglu": True,  # organizers' example, kept running; does not count as ours
     "mlp_fp16": True,        # MLP keeps fp16 activations (uses the example's SwiGLU kernel)
+    "adam_host": True,       # AdamW moments in pinned host memory between optimizer steps
+    "cublas_workspace": None,  # e.g. ":4096:1"; A/B on one T4: -8 MiB, +4.2 s, so the default stays
+    "direct_nograd": True,   # no Function.apply wrappers when no graph is recorded (direct.py)
+    "fused_layer_input": True,  # a rerun layer's input packed and restored in one kernel each way
+    "fused_head_acc": True,  # the head's gradient accumulation in one kernel per slice
+    "lean_draw": True,       # dropout draws from fresh ones instead of a kept 12 MiB buffer
     "mlp_gateup_recompute": True,  # layers not rerun keep the MLP input, redo gate/up in backward
     "mlp_tail": True,        # a rerun MLP skips down_proj and SwiGLU forward: their values are never read
     "rmsnorm": True,         # ours: fused RMSNorm forward/backward
@@ -80,6 +89,16 @@ def _warmup_jobs():
 
 
 def apply():
+    dropout.KEEP_ONES = not FEATURES["lean_draw"]
+    direct.enabled = FEATURES["direct_nograd"]
+    stream.LAYER_UNPACK = FEATURES["layer_unpack"]
+    layer_input.enabled = FEATURES["fused_layer_input"]
+    head_stream.FUSED_ACC = FEATURES["fused_head_acc"]
+    if FEATURES["cublas_workspace"]:  # read when the first matmul creates the cuBLAS handle
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", FEATURES["cublas_workspace"])
+    if FEATURES["adam_host"]:
+        patch_adam_host()
+    head_stream.SLICE = FEATURES["head_slice"]
     if FEATURES["startup_cache"]:
         import_bitsandbytes_without_compile_wrappers()  # first: peft and trl import it too
     # compile in the background from here on, while the rest of apply() imports and patches and
