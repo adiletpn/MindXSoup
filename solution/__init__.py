@@ -40,6 +40,7 @@ FEATURES = {
     "rope": True,            # ours (teammate): rotary embedding for q and k in one launch each way
     "fp16_embedding": True,  # tied embedding / lm_head stored in fp16 (same values), -445 MiB
     "head_stream": True,     # ours: that fp16 table in pinned host memory, head by vocab slices
+    "head_slice": 4096,      # vocabulary rows per head slice (a multiple of the kernel's 4096)
     "attention_fp16": True,  # ours (teammate): fp16 q/k/v, one kernel for LoRA sum + RoPE + cast
     "unpad": True,           # pad tokens never enter the decoder; attention per row
     "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
