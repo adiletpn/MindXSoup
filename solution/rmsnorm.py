@@ -16,6 +16,8 @@ import torch
 import triton
 import triton.language as tl
 
+from . import direct
+
 
 @triton.jit
 def rmsnorm_fwd_kernel(x_ptr, w_ptr, y_ptr, rstd_ptr, n_cols, eps, BLOCK: tl.constexpr):
@@ -91,7 +93,7 @@ class RMSNormFunction(torch.autograd.Function):
 
 
 def rmsnorm(x, weight, eps):
-    return RMSNormFunction.apply(x, weight, eps)
+    return direct.run(RMSNormFunction, x, weight, eps)
 
 
 _SUPPORTED = (torch.float16, torch.float32)
