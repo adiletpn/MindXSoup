@@ -43,6 +43,8 @@ FEATURES = {
     "recompute": True,       # rerun decoder layers in backward, keep only their inputs (budget in recompute.py)
     "recompute_fp16_inputs": True,  # rerun layers keep their input as scaled fp16 rows, not fp32
     "recompute_host_inputs": True,  # ... and those fp16 rows wait for backward in pinned host memory
+    "recompute_group_tokens": 512,  # ... and rerun layers run their rows in groups of this many tokens
+    "recompute_no_rerun": False,  # the layer hook only gives the streamer its hints, nothing reruns
     "offload_activations": False,  # instead of rerunning, layers' saved tensors wait in pinned host memory
     "stream_weights": True,  # decoder 4-bit weights in pinned host memory, one layer on the GPU at a time
     "warmup": True,          # compile the kernels above in a background thread during model load
@@ -111,7 +113,8 @@ def apply():
     if FEATURES["recompute"]:
         patch_qwen2_layer_recompute(fp16=FEATURES["recompute_fp16_inputs"],
                                     host=FEATURES["recompute_host_inputs"],
-                                    offload_activations=FEATURES["offload_activations"])
+                                    offload_activations=FEATURES["offload_activations"],
+                                    group_tokens=FEATURES["recompute_group_tokens"])
     if FEATURES["stream_weights"] and FEATURES["nf4"] and FEATURES["nf4_direct"]:
         patch_stream_layers()  # set up by the fused head's forward, before the first step
     if FEATURES["fp16_embedding"]:
