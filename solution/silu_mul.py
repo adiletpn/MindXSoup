@@ -49,3 +49,36 @@ def silu_mul_kernel(grad_ptr, gate_ptr, up_ptr, out_ptr, n_cols, COLS: tl.conste
 def _grid(t):
     n_cols = t.shape[-1]
     return (t.numel() // n_cols,), n_cols
+
+
+class SiluMulInPlace(torch.autograd.Function):
+    """silu(gate) * up in fp16; backward returns gate's and up's own memory holding their
+    gradients. Only for gate/up that nothing else reads after this backward (the MLP's
+    projections, whose 4-bit weights are frozen and keep no input)."""
+
+    @staticmethod
+    def forward(ctx, gate, up):
+        gate = gate.contiguous()
+        up = up.to(gate.dtype).contiguous()
+        out = torch.empty_like(gate)
+        grid, n_cols = _grid(gate)
+        silu_mul_kernel[grid](gate, gate, up, out, n_cols, COLS=COLS_PER_PROGRAM,
+                              BACKWARD=False, num_warps=WARPS)
+        ctx.save_for_backward(gate, up)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        gate, up = ctx.saved_tensors
+        grad = grad.to(gate.dtype).contiguous()
+        grid, n_cols = _grid(gate)
+        silu_mul_kernel[grid](grad, gate, up, gate, n_cols, COLS=COLS_PER_PROGRAM,
+                              BACKWARD=True, num_warps=WARPS)
+        return gate, up
+
+
+def silu_mul(gate, up):
+    if gate.dtype != torch.float16 or not gate.is_cuda or gate.shape != up.shape \
+            or gate.numel() == 0:
+        return torch.nn.functional.silu(gate) * up
+    return direct.run(SiluMulInPlace, gate, up)
