@@ -49,7 +49,7 @@ def compile_rope():
 
 
 def compile_head_stream():
-    from .head_stream import SLICE, launch_slice
+    from .head_stream import SLICE, head_acc_kernel, launch_slice
 
     logits = torch.zeros(1, SLICE, dtype=torch.float16, device="cuda")
     target = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -58,6 +58,9 @@ def compile_head_stream():
     state += [torch.zeros(1, device="cuda") for _ in range(3)]
     for grad, acc in ((False, True), (False, False), (True, False)):  # one walk; two walks
         launch_slice(logits, target, state, 0, 1.0, grad, acc)
+    head_acc_kernel[(1,)](torch.zeros(1, HIDDEN, device="cuda"), torch.ones(1, device="cuda"),
+                          torch.zeros(1, HIDDEN, dtype=torch.float16, device="cuda"), HIDDEN,
+                          num_warps=8)
 
 
 def compile_head_ce():
