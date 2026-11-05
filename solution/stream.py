@@ -1,4 +1,4 @@
-"""Keep the decoder layers' 4-bit weights in pinned host memory and bring each layer's weights to
+"""Keep the decoder layers' 4-bit weights (packed bytes and block scales) in pinned host memory and bring each layer's weights to
 the GPU only while it runs (offloading in our own code: allowed by the rules, "recomputation or
 offloading in your own code (its time counts)").
 
@@ -38,7 +38,11 @@ class LayerStreamer:
             for module in modules:
                 offload(module.weight)  # no-op when it already left the GPU at load time
                 numel = module.weight._mindx_host.numel()
-                self.entries[id(module)] = (layer, offset, numel, module.weight._mindx_shape)
+                self.entries[id(module)] = [layer, offset, numel, module.weight._mindx_shape, 0, 0]
+                offset += numel
+            for module in modules:  # each block's 8-bit scale follows all the layer's packed bytes
+                numel = module.weight._mindx_absmax.numel()
+                self.entries[id(module)][4:] = [offset, numel]
                 offset += numel
             sizes.append(offset)
         self.slot_bytes = max(sizes)
@@ -48,10 +52,13 @@ class LayerStreamer:
         for layer, modules in enumerate(groups if COALESCE_TRANSFERS else []):
             host = torch.empty(sizes[layer], dtype=torch.uint8, pin_memory=True)
             for module in modules:
-                _, offset, numel, _ = self.entries[id(module)]
+                _, offset, numel, _, abs_offset, abs_numel = self.entries[id(module)]
                 view = host[offset:offset + numel]
                 view.copy_(module.weight._mindx_host)
                 module.weight._mindx_host = view
+                view = host[abs_offset:abs_offset + abs_numel]
+                view.copy_(module.weight._mindx_absmax)
+                module.weight._mindx_absmax = view
             self.host_layers.append(host)
         self.slots = [torch.empty(self.slot_bytes, dtype=torch.uint8, device="cuda")
                       for _ in range(min(slots, len(groups)))]
@@ -88,9 +95,11 @@ class LayerStreamer:
                 self.slots[slot][:host.numel()].copy_(host, non_blocking=True)
             else:
                 for module in self.groups[layer]:
-                    _, offset, numel, _ = self.entries[id(module)]
+                    _, offset, numel, _, abs_offset, abs_numel = self.entries[id(module)]
                     self.slots[slot][offset:offset + numel].copy_(
                         module.weight._mindx_host, non_blocking=True)
+                    self.slots[slot][abs_offset:abs_offset + abs_numel].copy_(
+                        module.weight._mindx_absmax, non_blocking=True)
             ready = torch.cuda.Event()
             ready.record(self.copy_stream)
         self.slot_layer[slot] = layer
@@ -107,12 +116,14 @@ class LayerStreamer:
         self.slot_used[slot] = self.clock
         return slot
 
-    def packed_for(self, module):
-        """The module's packed NF4 bytes on the GPU, ready for the current stream."""
+    def bytes_for(self, module):
+        """The module's packed NF4 bytes and 8-bit block scales on the GPU, ready for the current
+        stream."""
         with self.lock:
-            layer, offset, numel, shape = self.entries[id(module)]
+            layer, offset, numel, shape, abs_offset, abs_numel = self.entries[id(module)]
             slot = self._acquire(layer)
-            return self.slots[slot][offset:offset + numel].view(shape)
+            data = self.slots[slot]
+            return data[offset:offset + numel].view(shape), data[abs_offset:abs_offset + abs_numel]
 
     def layer_begins(self, layer, forward):
         """Hint from the decoder layer: it is about to run (forward, or its recomputation in
