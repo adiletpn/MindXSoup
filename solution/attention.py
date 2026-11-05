@@ -21,6 +21,7 @@ import torch
 import triton
 import triton.language as tl
 
+from . import direct
 from .mlp import _is_fp16_4bit
 
 
@@ -166,8 +167,8 @@ class QKVRoPEFunction(torch.autograd.Function):
 
 
 def qkv_rope(q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv, q_scale=1.0, v_scale=1.0):
-    return QKVRoPEFunction.apply(q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv,
-                                 q_scale, v_scale)
+    return direct.run(QKVRoPEFunction, q_base, q_lora, k, v_base, v_lora, cos, sin, n_q, n_kv,
+                      q_scale, v_scale)
 
 
 def _split_projection(proj):

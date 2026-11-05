@@ -1,4 +1,4 @@
-"""Keep the decoder layers' 4-bit weights in pinned host memory and bring each layer's weights to
+"""Keep the decoder layers' 4-bit weights (packed bytes and block scales) in pinned host memory and bring each layer's weights to
 the GPU only while it runs (offloading in our own code: allowed by the rules, "recomputation or
 offloading in your own code (its time counts)").
 
@@ -18,9 +18,12 @@ import threading
 
 import torch
 
+from . import nf4
+
 SLOTS = 2
 COALESCE_TRANSFERS = True
 PREFETCH = 2
+LAYER_UNPACK = True  # all weights of the running layer unpacked by one launch, into one fp16 buffer
 
 _streamer = None
 enabled = False  # set by patch_stream_layers()
@@ -38,7 +41,11 @@ class LayerStreamer:
             for module in modules:
                 offload(module.weight)  # no-op when it already left the GPU at load time
                 numel = module.weight._mindx_host.numel()
-                self.entries[id(module)] = (layer, offset, numel, module.weight._mindx_shape)
+                self.entries[id(module)] = [layer, offset, numel, module.weight._mindx_shape, 0, 0]
+                offset += numel
+            for module in modules:  # each block's 8-bit scale follows all the layer's packed bytes
+                numel = module.weight._mindx_absmax.numel()
+                self.entries[id(module)][4:] = [offset, numel]
                 offset += numel
             sizes.append(offset)
         self.slot_bytes = max(sizes)
@@ -48,10 +55,13 @@ class LayerStreamer:
         for layer, modules in enumerate(groups if COALESCE_TRANSFERS else []):
             host = torch.empty(sizes[layer], dtype=torch.uint8, pin_memory=True)
             for module in modules:
-                _, offset, numel, _ = self.entries[id(module)]
+                _, offset, numel, _, abs_offset, abs_numel = self.entries[id(module)]
                 view = host[offset:offset + numel]
                 view.copy_(module.weight._mindx_host)
                 module.weight._mindx_host = view
+                view = host[abs_offset:abs_offset + abs_numel]
+                view.copy_(module.weight._mindx_absmax)
+                module.weight._mindx_absmax = view
             self.host_layers.append(host)
         self.slots = [torch.empty(self.slot_bytes, dtype=torch.uint8, device="cuda")
                       for _ in range(min(slots, len(groups)))]
@@ -61,6 +71,70 @@ class LayerStreamer:
         self.layer_slot = {}
         self.clock = 0
         self.current = None
+        self.unpacked = None  # the layer whose weights the buffer holds
+        self.weights = {}  # id(module) -> [N, K] fp16 view of the buffer
+        self.layer_tables = self._layer_tables() if LAYER_UNPACK else None
+
+    def _layer_tables(self):
+        """Per layer, what nf4_layer_kernel reads besides the bytes; None unless every layer is
+        the same list of nested NF4 weights of whole programs."""
+        shapes = [tuple(tuple(m.weight.quant_state.shape) for m in g) for g in self.groups]
+        if len(set(shapes)) != 1:
+            return None
+        device = self.slots[0].device
+        program_bytes = nf4.WIDE_BLOCKS * 32
+        module_of, block0, scale0, scales = [], [], [], 0
+        blocks = 0
+        for index, module in enumerate(self.groups[0]):
+            _, offset, numel, _, abs_offset, abs_numel = self.entries[id(module)]
+            state = module.weight.quant_state
+            if (numel % program_bytes or abs_numel * 32 != numel or offset != blocks * 32
+                    or abs_offset != self.entries[id(self.groups[0][0])][4] + blocks
+                    or state.state2.code.numel() != 256 or state.state2.code.dtype != torch.float32
+                    or state.state2.absmax.dtype != torch.float32 or state.offset.numel() != 1
+                    or state.dtype != torch.float16):
+                return None
+            module_of += [index] * (numel // program_bytes)
+            block0.append(blocks)
+            scale0.append(scales)
+            blocks += abs_numel
+            scales += state.state2.absmax.numel()
+        tables = []
+        for group in self.groups:
+            states = [m.weight.quant_state for m in group]
+            if any(s.state2.absmax.numel() != m.weight.quant_state.state2.absmax.numel()
+                   for s, m in zip(states, self.groups[0])):
+                return None
+            tables.append((torch.cat([s.state2.code.reshape(-1) for s in states]).to(device),
+                           torch.cat([s.state2.absmax.reshape(-1) for s in states]).to(device),
+                           torch.cat([s.offset.reshape(-1).float() for s in states]).to(device)))
+        self.module_of = torch.tensor(module_of, dtype=torch.int8, device=device)
+        self.block0 = torch.tensor(block0, dtype=torch.int32, device=device)
+        self.scale0 = torch.tensor(scale0, dtype=torch.int32, device=device)
+        self.packed_bytes, self.absmax_start = blocks * 32, self.entries[id(self.groups[0][0])][4]
+        self.buffer = torch.empty(blocks * 64, dtype=torch.float16, device=device)
+        for group in self.groups:
+            first = 0
+            for module in group:
+                numel = self.entries[id(module)][2]
+                shape = tuple(module.weight.quant_state.shape)
+                self.weights[id(module)] = self.buffer[first:first + 2 * numel].view(shape)
+                first += 2 * numel
+        return tables
+
+    def _unpack_layer(self, layer, slot):
+        if self.layer_tables is None or self.unpacked == layer:
+            return
+        data = self.slots[slot]
+        code, absmax2, offset = self.layer_tables[layer]
+        nf4.launch_layer(data[:self.packed_bytes], self.buffer,
+                         data[self.absmax_start:self.absmax_start + self.packed_bytes // 32],
+                         code, absmax2, offset, self.module_of, self.block0, self.scale0)
+        self.unpacked = layer
+
+    def weight_for(self, module):
+        """The module's unpacked fp16 weight when its layer is the one in the buffer, else None."""
+        return self.weights[id(module)] if self.entries[id(module)][0] == self.unpacked else None
 
     def _victim(self, keep):
         free = [i for i, layer in enumerate(self.slot_layer) if layer is None]
@@ -88,9 +162,11 @@ class LayerStreamer:
                 self.slots[slot][:host.numel()].copy_(host, non_blocking=True)
             else:
                 for module in self.groups[layer]:
-                    _, offset, numel, _ = self.entries[id(module)]
+                    _, offset, numel, _, abs_offset, abs_numel = self.entries[id(module)]
                     self.slots[slot][offset:offset + numel].copy_(
                         module.weight._mindx_host, non_blocking=True)
+                    self.slots[slot][abs_offset:abs_offset + abs_numel].copy_(
+                        module.weight._mindx_absmax, non_blocking=True)
             ready = torch.cuda.Event()
             ready.record(self.copy_stream)
         self.slot_layer[slot] = layer
@@ -107,12 +183,14 @@ class LayerStreamer:
         self.slot_used[slot] = self.clock
         return slot
 
-    def packed_for(self, module):
-        """The module's packed NF4 bytes on the GPU, ready for the current stream."""
+    def bytes_for(self, module):
+        """The module's packed NF4 bytes and 8-bit block scales on the GPU, ready for the current
+        stream."""
         with self.lock:
-            layer, offset, numel, shape = self.entries[id(module)]
+            layer, offset, numel, shape, abs_offset, abs_numel = self.entries[id(module)]
             slot = self._acquire(layer)
-            return self.slots[slot][offset:offset + numel].view(shape)
+            data = self.slots[slot]
+            return data[offset:offset + numel].view(shape), data[abs_offset:abs_offset + abs_numel]
 
     def layer_begins(self, layer, forward):
         """Hint from the decoder layer: it is about to run (forward, or its recomputation in
@@ -121,7 +199,7 @@ class LayerStreamer:
             if not 0 <= layer < len(self.groups):
                 return
             self.current = layer
-            self._acquire(layer)
+            self._unpack_layer(layer, self._acquire(layer))
             step = 1 if forward else -1
             keep = {layer}
             for ahead in range(1, min(PREFETCH, len(self.slots) - 1) + 1):
@@ -138,29 +216,43 @@ class LayerStreamer:
         return id(module) in self.entries
 
 
-def offload(param):
-    """Move a quantized Params4bit's packed bytes to pinned host memory, once; a 1-byte placeholder
-    of the same shape and dtype stays on the GPU, so the module still looks like a CUDA weight."""
+def offload(param, pin=True):
+    """Move a quantized Params4bit's packed bytes and 8-bit block scales to pinned host memory,
+    once; 1-byte placeholders of the same shapes stay on the GPU, so the module still looks like a
+    CUDA weight."""
     if hasattr(param, "_mindx_host"):
         return
     data = param.data
-    host = torch.empty(data.numel(), dtype=torch.uint8, pin_memory=True)
+    host = torch.empty(data.numel(), dtype=torch.uint8, pin_memory=pin)
     host.copy_(data.reshape(-1))
     param._mindx_host, param._mindx_shape = host, tuple(data.shape)
     param.data = torch.empty(1, dtype=torch.uint8, device=data.device).expand(data.shape)
+    state = param.quant_state
+    absmax = state.absmax
+    param._mindx_absmax = torch.empty(absmax.numel(), dtype=torch.uint8, pin_memory=pin)
+    param._mindx_absmax.copy_(absmax.reshape(-1))
+    state.absmax = torch.empty(1, dtype=torch.uint8, device=absmax.device).expand(absmax.shape)
 
 
 def offloaded(module):
     return hasattr(getattr(module, "weight", None), "_mindx_host")
 
 
-def packed_for(module):
-    """The module's packed NF4 bytes on the GPU: from the streamer's slots, or (before the
-    streamer exists, e.g. a forward before training) a one-off synchronous copy."""
+def bytes_for(module):
+    """The module's packed NF4 bytes and block scales on the GPU: from the streamer's slots, or
+    (before the streamer exists, e.g. a forward before training) a one-off synchronous copy."""
     if _streamer is not None and _streamer.owns(module):
-        return _streamer.packed_for(module)
+        return _streamer.bytes_for(module)
     weight = module.weight
-    return weight._mindx_host.to(weight.device).view(weight._mindx_shape)
+    return (weight._mindx_host.to(weight.device).view(weight._mindx_shape),
+            weight._mindx_absmax.to(weight.device))
+
+
+def weight_for(module):
+    """The module's weight already unpacked for the running layer, or None."""
+    if _streamer is not None and _streamer.owns(module):
+        return _streamer.weight_for(module)
+    return None
 
 
 def active():
@@ -235,7 +327,8 @@ def patch_offload_at_load():
             if enabled and isinstance(result, dict):
                 for name, value in result.items():
                     if _offload_at_load(name, value):
-                        offload(value)
+                        # plain memory for now: LayerStreamer copies it once into pinned layer blocks
+                        offload(value, pin=not COALESCE_TRANSFERS)
             return result
 
         cls.convert = convert

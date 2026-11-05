@@ -95,6 +95,19 @@ def skip_unused_optional_imports():
             import transformers.generation.candidate_generator  # noqa: F401
         finally:
             transformers_utils.is_sklearn_available = real
+    # The same for the two other ways in: transformers.data.metrics (sklearn, via TRL's data
+    # collator) and transformers.loss.loss_for_object_detection (scipy, via the loss registry);
+    # neither metrics nor detection losses are used by a causal-LM run (organizers, QA 73).
+    for module in ("transformers.data.data_collator", "transformers.loss.loss_utils"):
+        if module in sys.modules:
+            continue
+        real = transformers_utils.is_sklearn_available, transformers_utils.is_scipy_available
+        transformers_utils.is_sklearn_available = lambda: False
+        transformers_utils.is_scipy_available = lambda: False
+        try:
+            __import__(module)
+        finally:
+            transformers_utils.is_sklearn_available, transformers_utils.is_scipy_available = real
     if "trl.trainer.base_trainer" not in sys.modules:
         transformers.__dict__["is_wandb_available"] = lambda: False  # what trl imports by name
         try:

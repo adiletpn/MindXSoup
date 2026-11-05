@@ -24,6 +24,7 @@ import triton.language as tl
 
 SLICE = 4096   # vocabulary rows per slice: 4096 x 1536 fp16 = 12 MiB per buffer
 BLOCK = 4096   # = fused_ce.VOCAB_BLOCK; SLICE is a multiple, so the block boundaries agree
+FUSED_ACC = True  # the walk's accumulation in one kernel
 ONE_WALK = True  # gradient accumulated in the same walk (FlashAttention-style rescaling)
 
 enabled = False  # set by patch_head_stream()
@@ -93,6 +94,18 @@ def head_slice_kernel(logits_ptr, target_ptr, m_ptr, s_ptr, t_ptr, best_ptr, bes
                 tl.store(row_ptr + idx, p.to(logits_ptr.dtype.element_ty), mask=valid)
 
 
+@triton.jit
+def head_acc_kernel(acc_ptr, alpha_ptr, gain_ptr, n_cols, BLOCK: tl.constexpr = 2048):
+    # acc = acc * alpha + fp32(gain), one program per token row, instead of a mul, a cast and an add
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < n_cols
+    here = row.to(tl.int64) * n_cols + cols
+    acc = tl.load(acc_ptr + here, mask=mask, other=0.0) * tl.load(alpha_ptr + row)
+    tl.store(acc_ptr + here, acc + tl.load(gain_ptr + here, mask=mask, other=0.0).to(tl.float32),
+             mask=mask)
+
+
 def launch_slice(logits, target, state, col0, grad_scale, grad, acc=False):
     m, s, t, best, best_idx, x_target, lse, alpha = state
     head_slice_kernel[(logits.shape[0],)](
@@ -151,6 +164,7 @@ class HostTable:
             yield col0, buffers[k][:min(SLICE, self.vocab - col0)]
             free[k] = torch.cuda.Event()
             free[k].record(compute)
+        self.buffers = None  # back to the allocator for the decoder's backward (the training peak)
 
     def gather(self, ids):
         """table[ids] on the GPU: the rows are gathered on the host, then copied."""
@@ -224,8 +238,13 @@ def head_ce(flat, table, target, grad_scale, with_grad):
         torch.mm(flat, w.t(), out=buf)
         launch_slice(buf, target, state, col0, grad_scale, grad=False, acc=one_walk)
         if one_walk:  # buf now holds exp(x - m): accumulate sum_j exp(x_j - m) * W_j
-            acc.mul_(alpha.unsqueeze(1))
-            acc += torch.mm(buf, w).float()
+            gain = torch.mm(buf, w)
+            if FUSED_ACC:
+                head_acc_kernel[(rows,)](acc, alpha, gain, flat.shape[1], num_warps=8)
+            else:
+                acc.mul_(alpha.unsqueeze(1))
+                acc += gain.float()
+            del gain
     torch.add(m, torch.log(s), out=lse)
     entropy = lse - t / s
     labelled = target != -100

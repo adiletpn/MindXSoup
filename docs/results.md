@@ -119,3 +119,42 @@ Artifacts: `kaggle_out/full/out/runs/result.json`, `checks.json`, and `kaggle_ou
 **31.10 23:00 public Kaggle notebook adiletzholdasbek/notebook659c3b6e49, COMMIT d0ef96f: ALL CHECKS PASSED.** base 86.13 s / 14 345 MiB, solution 58.37 s / 505 MiB, **1.476x**, memory 28.406x, eval −0.003%, own kernels 14.8%.
 
 **31.10 SwiGLU in-place A/B (branch swiglu-inplace c8b5a1f vs final-500, aqniet/dilya-swiglu-ab, one T4, alternating):** base 67.59/60.42 s, 505 MiB (torch 343.3); new 60.08/60.62 s, **485 MiB** (torch 329.1); eval 2.04964-2.04965 both; 142 tests passed. −20 MiB (−4%), time within noise. Not taken (below the 5% threshold, after the code freeze).
+
+**4.11 floor-all, first runs (one run each, not --repeats 2; rules unless noted).** rules_time (NF4 weights cached in fp16): 42.35 s vs base 77.79 (1.837x), 6793 MiB, 10/10, own kernels 8.6%; with the packed bytes moved to host 44.16 s vs base 81.04 (1.835x), 6125 MiB, 10/10. Grouped layer rerun (rows of a rerun layer run in groups, with in-place SwiGLU and the block scales streamed): group 512: 91.06 s vs base 80.79, 429 MiB, check 8 FAIL. group 1024: 64.64 s vs 80.54, 449 MiB, 10/10; plus head buffers, dropout ones and the head gradient released through backward: **62.02 s vs 78.08 (1.259x), 409 MiB (35.07x), eval -0.001%, 10/10**. group 768 with the same release: 80.01 s vs 81.37, 389 MiB, 10/10.
+
+**4.11 T4 benches (tools/floor_bench.py, mindx-fl-gemm).** Backward GEMM with W column-major: slower or equal to row-major. Padding N to a multiple, splitting a GEMM into pieces: no consistent gain. Context 107 MiB, first GEMM +12 MiB, SDPA +8, Triton +6 (133 MiB). Dropout draws from fp16 or expanded ones differ from fp32 ones, so a fresh fp32 buffer is the cheapest legal draw.
+
+**4.11 whole-step microbatch (groups of 512 tokens, no layer rerun; idea from docs/PERF_ANALYSIS_INDEPENDENT.md), mindx-fl-ml1 / mf1.** Weights and table on the host: 72.09 s vs base 77.32, 1141 MiB, checks 10/10. Weights and table on the GPU: 58.38 s vs base 79.58, 2675 MiB, checks 10/10. Own test of the LoRA gradients against the whole batch failed at rtol 1e-4 (cause not established). Worse than the grouped rerun at 62 s / 409 MiB; code removed.
+
+**4.11 int8 forward (same document): not built.** The 31.10 probe already shows the first-step loss over 1% on 10-55 of 64 batches, which breaks check 6.
+
+**4.11 PERF_IDEAS idea 1 (W^T stored row-major for gate/up), tools/bench_layout.py, mindx-fl-layout, one session, two rounds:** forward -11...+13%, backward -12...+15% depending on N, no stable gain. Not built.
+
+**4.11 PERF_IDEAS idea 2 (a rerun MLP skips down_proj and SwiGLU forward; group 1024), mindx-fl-tail1:** 60.06 s vs base 79.52 (1.324x), 389 MiB (36.88x), eval +0.001%, 10/10 (one run; 2 failures in pytest were a bug of the new test itself, fixed).
+
+**4.11 rules_balanced (group 1024 + dead-value MLP rerun), jury order --repeats 2, mindx-fl-bal-r2: 57.75 / 59.61 s vs base 75.94 / 78.38 (1.315x), 389 MiB (36.88x), eval +0.001%, 10/10.**
+
+**4.11 rules_balanced, seed 7, --repeats 2, mindx-fl-bal-s7: 61.74 / 61.67 s vs base 78.31 / 81.34 (1.294x), 407 MiB (35.26x), eval +0.002%, 10/10, 149 tests.**
+
+**4.11 rules_memory (group 512), seed 7, --repeats 2, mindx-fl-mem-s7: 80.33 / 82.04 s vs base 77.11 / 79.32 (0.963x), 349 MiB (41.12x), eval -0.001%, 10/10.**
+
+**4.11 rules_mid (no layer rerun, weights and table on the host), mindx-fl-mid1, one run: 45.42 s vs base 76.5 (1.684x), 3085 MiB (4.65x), eval 0.0%, 10/10.**
+
+**4.11 same-machine A/B, group 1024, order A B C C B A, mindx-fl-ab1 (solution only, one T4).** A plain: 62.27 / 61.52 s, 387 MiB. B AdamW moments on the host: 60.41 / 61.83 s, 381 MiB. C cuBLAS workspace :4096:1: 66.09 / 65.94 s, 379 MiB (median step x1.165). AdamW on the host taken (-6 MiB, no measurable time cost); the smaller workspace not taken (-8 MiB, +4.2 s).
+
+
+### A/B на одной машине: прямой проход, новые кернелы, причинность (floor-all, вне сданного коммита)
+
+- ab2, group 1024, все 381 MiB, 154 теста: без правок 57.21 / 60.36 с; прямой первый проход 59.56 / 60.17 с; плюс `layer_input` и `head_acc` 59.71 / 59.72 с. Выигрыша нет, разница в пределах шума.
+- ab3, задержка 100 мкс на CPU перед каждой распаковкой NF4 (630 запусков на шаг, ожидание +4.03 с): `rules_balanced` 60.21 / 59.12 / 58.11 с, цикл 40.81 / 39.98 / 39.26 с; с задержкой 63.93 / 62.27 / 61.96 с, цикл 44.63 / 43.25 / 43.14 с. Цикл +3.65 с, общее время +3.57 с: около 90% задержки проходит насквозь, GPU в этих местах ждёт CPU.
+- Один кернел на все 7 весов слоя (`nf4_layer_kernel`, `rules_fast`), A/B на одной машине, 8 прогонов, 172 теста: `rules_fast` 56.69 / 59.60 / 59.91 / 59.30 с, цикл 37.36 / 40.87 / 40.73 / 40.82 с, 441–443 MiB; `rules_balanced` 62.31 / 62.57 / 62.21 / 62.41 с, цикл 43.25 / 43.56 / 43.44 / 43.62 с, 381 MiB. Таймлайн: простой 191 → 111 мс на шаг, запусков распаковки 630 → 54. Полный прогон с 10 проверками ещё не делался.
+- Прочие проверки на `rules_fast` (1024): группы 1536 (фактически без групп) 55.75 / 56.05 с, 501–503 MiB, против 57.55 с у базы: около −1.5 с за +60 MiB. Копия входа слоя на хост в отдельном потоке GPU: 56.3 / 57.15 с, 461–463 MiB, эффект в пределах шума. Срез головы 8192: 57.15 / 57.0 с, 461 MiB, эффекта нет.
+- LoRA + dropout кернелами Triton (один запуск вперёд, два назад, r=16): 67.42 / 67.13 с против 58.75 / 60.10 с у `rules_fast`, то есть +7–8 с; после исправления чтения памяти осталось то же. Отклонено: матмулы cuBLAS на тензорных ядрах кернел Triton не догоняет.
+- Третий слот для весов: 57.10 / 56.85 / 57.21 с, 481–483 MiB, против 57.10 / 57.04 с, 441–443 MiB (без первого, быстрого прогона машины 52.94 с): эффекта нет. Таймлайн `rules_fast`: 538.7 мс на шаг, кернелы заняты 79.8%, простой 65.8 мс, только копии 43 мс.
+- Полный прогон `rules_fast`, `--repeats 2`, 172 теста, 10/10: сид 1 — 58.8 / 57.89 с против базы 81.55 / 85.81 с (1.434x), 443 MiB (32.38x), eval −0.001%, свои кернелы 12.3%; сид 7 — 57.3 / 57.6 с против 79.81 / 83.47 с (1.421x), 461 MiB (31.13x), eval +0.002%, свои кернелы 13.3%.
+- k и v сразу на 12 голов в `qkv_rope_kernel` (минус ~220 запусков на шаг): 54.69 / 54.85 / 54.70 / 55.19 с против 52.89 / 54.85 / 55.34 с у `rules_fast` без первого прогона, 443 MiB: эффекта нет.
+- **Редкая ошибка:** в прогоне `rules_fast` (ab12, 9-й на машине) фоновая компиляция `compile_head_stream` упала в MLIR (`LLVMDIScope`, `PassManager::run failed`), затем обучение встало на нулевом шаге и было убито по таймауту 900 с. В сохранённых логах это единственный случай. Стресс-тест: `tools/floor_compile_stress.py`.
+- Стресс-тест компиляции (`tools/floor_compile_stress.py loop`, `apply()` + загрузка модели, пустой кэш, без Soup): 538 раундов, 0 сбоев. Ошибку не воспроизвёл; условия отличаются от реального запуска.
+- Имитация сбоя фоновой компиляции кернела головы (обе попытки падают): основной поток компилирует сам, прогон завершён, 54.85 с, 441 MiB, без зависания. Путь после обычного исключения исправен.
+- Настоящие прогоны `rules_fast` с повтором компиляции и дампом стеков: 61 из 61 завершён, зависаний нет. Метка «bad» в этом логе ложная, ошибка в условии инструмента (исправлено). Сбой компиляции без зависания этот лог исключить не может: выводились только последние 150 строк. Всего по сохранённым логам: 1 зависание примерно на 150 настоящих прогонов; причина неизвестна.
+- Полный прогон `rules_fast` без групп строк (теперь профиль по умолчанию), `--repeats 2`, 172 теста, 10/10: сид 1 — 53.4 / 52.76 с против базы 78.79 / 79.78 с (1.494x), 501 MiB (28.63x), eval +0.000%, свои кернелы 14.5%; сид 7 — 53.49 / 52.55 с против 77.22 / 79.16 с (1.475x), 481 MiB (29.84x), eval +0.001%, свои кернелы 14.3%.

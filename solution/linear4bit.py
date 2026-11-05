@@ -15,10 +15,11 @@ import contextlib
 
 import torch
 
-from . import stream
+from . import direct, stream
 from .nf4 import _supported, unpack_nf4
 
 _enabled = True
+cache_fp16 = False  # set by patch_bnb_linear4bit(cache_fp16=True): each weight unpacked once, kept in fp16
 
 
 @contextlib.contextmanager
@@ -32,10 +33,11 @@ def disabled():
         _enabled = previous
 
 
-def _unpack(packed, state, dtype):
+def _unpack(packed, state, dtype, absmax_8bit=None):
     """The fp16 [N, K] weight, as bitsandbytes' fallback and dequantize_4bit produce it."""
     return unpack_nf4(packed, state.shape, state.state2.absmax, state.blocksize, dtype,
-                      absmax_8bit=state.absmax, code=state.state2.code, offset=state.offset)
+                      absmax_8bit=state.absmax if absmax_8bit is None else absmax_8bit,
+                      code=state.state2.code, offset=state.offset)
 
 
 class NF4LinearFunction(torch.autograd.Function):
@@ -55,6 +57,15 @@ class NF4LinearFunction(torch.autograd.Function):
         return grad_x, None, None, None
 
 
+def streamed_weight(module, state):
+    """The module's fp16 weight: from the running layer's buffer, or unpacked from its bytes."""
+    weight = stream.weight_for(module)
+    if weight is not None:
+        return weight
+    packed, absmax = stream.bytes_for(module)
+    return _unpack(packed, state, state.dtype, absmax)
+
+
 class NF4StreamFunction(torch.autograd.Function):
     """NF4LinearFunction for a module whose bytes live on the host (stream.py): the bytes are
     asked for right before each use, in forward and again in backward."""
@@ -62,16 +73,13 @@ class NF4StreamFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, module, state, bias):
         ctx.module, ctx.state = module, state
-        packed = stream.packed_for(module)
-        return torch.nn.functional.linear(x, _unpack(packed, state, x.dtype), bias)
+        return torch.nn.functional.linear(x, streamed_weight(module, state).to(x.dtype), bias)
 
     @staticmethod
     def backward(ctx, grad):
         grad_x = None
         if ctx.needs_input_grad[0]:
-            packed = stream.packed_for(ctx.module)
-            grad_x = torch.matmul(grad, _unpack(packed, ctx.state, ctx.state.dtype)
-                                  .to(grad.dtype))
+            grad_x = torch.matmul(grad, streamed_weight(ctx.module, ctx.state).to(grad.dtype))
         return grad_x, None, None, None
 
 
@@ -86,7 +94,7 @@ def _streamed_forward(layer, x):
         if bias.dtype != x.dtype:
             bias.data = bias.data.to(x.dtype)
         bias = bias.to(layer.compute_dtype)
-    return NF4StreamFunction.apply(x, layer, layer.weight.quant_state, bias).to(inp_dtype)
+    return direct.run(NF4StreamFunction, x, layer, layer.weight.quant_state, bias).to(inp_dtype)
 
 
 def _bnb_picks_fused_kernel(x, state):
@@ -121,15 +129,43 @@ def _direct_ok(layer, x):
             and not _bnb_picks_fused_kernel(x, state))
 
 
-def patch_bnb_linear4bit():
+def _cached_weight(layer, x):
+    """The module's weight unpacked once to fp16 and kept, while the packed bytes wait on the host
+    (same values as every per-use unpack, without the kernel, for 2 B per value of GPU memory
+    instead of 0.5 B). None unless this call would take the direct path."""
+    weight16 = layer.__dict__.get("_mindx_weight16")
+    if weight16 is None:
+        if not _direct_ok(layer, x):
+            return None
+        packed = layer.weight.data.view(-1, 1)
+        weight16 = _unpack(packed, layer.weight.quant_state, torch.float16)
+        layer.__dict__["_mindx_weight16"] = weight16
+        stream.offload(layer.weight, pin=False)  # only a call that needs bnb's kernel reads them now
+        return weight16
+    if not (_enabled and isinstance(x, torch.Tensor) and x.is_cuda and x.dtype == torch.float16
+            and x.numel() > 0 and x.shape[-1] == weight16.shape[1]):
+        return None
+    return weight16
+
+
+def patch_bnb_linear4bit(cache_weights=False):
     import bitsandbytes as bnb
 
+    global cache_fp16
+    cache_fp16 = cache_weights
     cls = bnb.nn.Linear4bit
     if getattr(cls, "_mindx_direct", False):
         return
     original = cls.forward
 
     def forward(self, x):
+        if cache_fp16:
+            weight16 = _cached_weight(self, x)
+            if weight16 is not None:
+                bias = self.bias
+                if bias is not None and bias.dtype != x.dtype:  # what Linear4bit.forward does, once
+                    bias.data = bias.data.to(x.dtype)
+                return torch.nn.functional.linear(x, weight16, bias)
         if isinstance(x, torch.Tensor) and x.is_cuda and stream.offloaded(self):
             return _streamed_forward(self, x)
         if not _direct_ok(self, x):
@@ -140,7 +176,7 @@ def patch_bnb_linear4bit():
                 bias.data = bias.data.to(x.dtype)
             bias = bias.to(self.compute_dtype)
         packed = self.weight.data.view(-1, 1)  # canonical [(N*K+1)//2, 1], as MatMul4Bit uses
-        return NF4LinearFunction.apply(x, packed, self.weight.quant_state, bias)
+        return direct.run(NF4LinearFunction, x, packed, self.weight.quant_state, bias)
 
     cls.forward = forward
     cls._mindx_direct = True

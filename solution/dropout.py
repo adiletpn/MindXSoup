@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from . import direct
+
 @triton.jit
 def lora_dropout_kernel(src_ptr, drawn_ptr, index_ptr, keep_ptr, out_ptr, scale,
                         COLS: tl.constexpr, BLOCK: tl.constexpr, BACKWARD: tl.constexpr):
@@ -67,7 +69,29 @@ class PackedDropout(torch.autograd.Function):
         return dx, None, None, None, None
 
 
+class KeptDropout(torch.autograd.Function):
+    """PackedDropout for one group of rows, with the mask already drawn and kept (recompute.py).
+    keep: [n, hidden] int8, the group's part of the layer's mask. Both ways run the kernel's
+    BACKWARD branch: out = x * scale where kept, else 0."""
+
+    @staticmethod
+    def forward(ctx, x, keep, scale, out_dtype):
+        x = x.contiguous()
+        out = torch.empty_like(x, dtype=out_dtype)
+        _launch(x, keep, keep, keep, out, scale, backward=True)
+        ctx.keep, ctx.scale, ctx.x_dtype = keep, scale, x.dtype
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        grad = grad.contiguous()
+        dx = torch.empty_like(grad, dtype=ctx.x_dtype)
+        _launch(grad, ctx.keep, ctx.keep, ctx.keep, dx, ctx.scale, backward=True)
+        return dx, None, None, None
+
+
 _ones = None
+KEEP_ONES = True  # False: a fresh buffer per draw, so nothing of the draw stays through the matmuls
 
 
 def ones_like_draw(batch, length, cols, dtype, device):
@@ -79,7 +103,17 @@ def ones_like_draw(batch, length, cols, dtype, device):
     return _ones[:n].view(batch, length, cols)
 
 
+def draw_keep(p, batch, length, cols, dtype, device, index):
+    """The base's draw for a [B, T, cols] input, as [N, cols] int8 of the real tokens' rows."""
+    # fresh ones, not the persistent buffer: nothing of the draw stays through the layer's matmuls
+    drawn = torch.nn.functional.dropout(torch.ones((batch, length, cols), dtype=dtype, device=device),
+                                        p, True)
+    return drawn.view(batch * length, cols).index_select(0, index).ne(0).to(torch.int8)
+
+
 def packed_dropout(x, p, batch, length, index, out_dtype):
-    drawn = torch.nn.functional.dropout(
-        ones_like_draw(batch, length, x.shape[2], x.dtype, x.device), p, True)
-    return PackedDropout.apply(x, drawn, index, 1.0 / (1.0 - p), out_dtype)
+    ones = ones_like_draw(batch, length, x.shape[2], x.dtype, x.device) if KEEP_ONES else \
+        torch.ones((batch, length, x.shape[2]), dtype=x.dtype, device=x.device)
+    drawn = torch.nn.functional.dropout(ones, p, True)
+    del ones
+    return direct.run(PackedDropout, x, drawn, index, 1.0 / (1.0 - p), out_dtype)

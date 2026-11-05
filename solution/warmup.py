@@ -22,6 +22,7 @@ HIDDEN, Q_HEADS, KV_HEADS, HEAD_DIM, INTERMEDIATE, VOCAB = 1536, 12, 2, 128, 896
 RMS_EPS = 1e-6
 
 _thread = None
+KEPT_MASKS = False  # set by apply(): dropout masks kept per group are in use
 
 
 def compile_rmsnorm():
@@ -48,7 +49,7 @@ def compile_rope():
 
 
 def compile_head_stream():
-    from .head_stream import SLICE, launch_slice
+    from .head_stream import SLICE, head_acc_kernel, launch_slice
 
     logits = torch.zeros(1, SLICE, dtype=torch.float16, device="cuda")
     target = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -57,6 +58,9 @@ def compile_head_stream():
     state += [torch.zeros(1, device="cuda") for _ in range(3)]
     for grad, acc in ((False, True), (False, False), (True, False)):  # one walk; two walks
         launch_slice(logits, target, state, 0, 1.0, grad, acc)
+    head_acc_kernel[(1,)](torch.zeros(1, HIDDEN, device="cuda"), torch.ones(1, device="cuda"),
+                          torch.zeros(1, HIDDEN, dtype=torch.float16, device="cuda"), HIDDEN,
+                          num_warps=8)
 
 
 def compile_head_ce():
@@ -67,6 +71,13 @@ def compile_head_ce():
     loss, entropy = (torch.empty(1, device="cuda") for _ in range(2))
     argmax = torch.empty(1, dtype=torch.int32, device="cuda")
     launch_rows(logits, target, loss, entropy, argmax, with_grad=True)
+
+
+def compile_layer_input():
+    from .layer_input import pack, restore
+
+    half, scale = pack(torch.zeros(1, 2, HIDDEN, device="cuda"))
+    restore(half, scale)
 
 
 def compile_nf4():
@@ -83,8 +94,22 @@ def compile_nf4():
                absmax_8bit=absmax_8bit, code=code, offset=offset)
 
 
+def compile_nf4_layer():
+    from .nf4 import WIDE_BLOCKS, launch_layer
+
+    n_bytes = WIDE_BLOCKS * 32
+    launch_layer(torch.zeros(n_bytes, dtype=torch.uint8, device="cuda"),
+                 torch.empty(2 * n_bytes, dtype=torch.float16, device="cuda"),
+                 torch.zeros(WIDE_BLOCKS, dtype=torch.uint8, device="cuda"),
+                 torch.zeros(256, device="cuda"), torch.ones(1, device="cuda"),
+                 torch.zeros(1, device="cuda"),
+                 torch.zeros(1, dtype=torch.int8, device="cuda"),
+                 torch.zeros(1, dtype=torch.int32, device="cuda"),
+                 torch.zeros(1, dtype=torch.int32, device="cuda"))
+
+
 def compile_lora_dropout():
-    from .dropout import PackedDropout
+    from .dropout import KeptDropout, PackedDropout
 
     tokens = 16
     x = torch.zeros(1, tokens, HIDDEN, device="cuda", requires_grad=True)
@@ -93,6 +118,21 @@ def compile_lora_dropout():
     # training: fp32 input, fp16 output for lora_A, fp16 gradient back
     out = PackedDropout.apply(x, drawn, index, 1.0 / 0.95, torch.float16)
     out.backward(torch.zeros(1, tokens, HIDDEN, dtype=torch.float16, device="cuda"))
+    if not KEPT_MASKS:
+        return
+    # groups of rows (recompute.py, microbatch.py): the mask already kept, both ways
+    keep = torch.ones(tokens, HIDDEN, dtype=torch.int8, device="cuda")
+    out = KeptDropout.apply(x, keep, 1.0 / 0.95, torch.float16)
+    out.backward(torch.zeros(1, tokens, HIDDEN, dtype=torch.float16, device="cuda"))
+
+
+def compile_silu_mul():
+    from .silu_mul import silu_mul
+
+    gate = torch.zeros(2, INTERMEDIATE, dtype=torch.float16, device="cuda", requires_grad=True)
+    up = torch.zeros(2, INTERMEDIATE, dtype=torch.float16, device="cuda", requires_grad=True)
+    silu_mul(gate * 1, up * 1).backward(torch.zeros(2, INTERMEDIATE, dtype=torch.float16,
+                                                    device="cuda"))
 
 
 def compile_example_swiglu():
@@ -109,10 +149,13 @@ def _compile_all(jobs):
     except (AttributeError, OSError):
         pass
     for job in jobs:
-        try:
-            job()
-        except Exception as exc:  # noqa: BLE001 - the real call compiles it instead
-            print(f"[mindx] warm-up of {job.__name__} skipped: {exc!r}", file=sys.stderr)
+        for attempt in (1, 2):  # a compile once failed inside MLIR in about 90 runs: try it again
+            try:
+                job()
+                break
+            except Exception as exc:  # noqa: BLE001 - after two, the real call compiles it instead
+                print(f"[mindx] warm-up of {job.__name__}, attempt {attempt}, failed: {exc!r}",
+                      file=sys.stderr)
 
 
 def start(jobs):

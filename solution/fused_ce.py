@@ -133,7 +133,7 @@ class FusedHeadCE(torch.autograd.Function):
         loss = token_loss.sum() / denominator
         if with_grad:
             grad.mul_(1.0 / GRAD_SCALE).div_(denominator)
-            ctx.save_for_backward(grad)
+            ctx.grad = grad  # not save_for_backward: backward takes it over and scales it in place
         ctx.hidden_shape, ctx.hidden_dtype = hidden.shape, hidden.dtype
         shape = hidden.shape[:-1]
         token_entropy, token_loss, argmax = (token_entropy.view(shape), token_loss.view(shape),
@@ -143,8 +143,8 @@ class FusedHeadCE(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_loss, _grad_entropy, _grad_token_loss, _grad_argmax):
-        (grad,) = ctx.saved_tensors
-        dh = (grad * grad_loss).to(ctx.hidden_dtype).view(ctx.hidden_shape)
+        grad, ctx.grad = ctx.grad, None  # no second [N, hidden] buffer through the decoder's backward
+        dh = grad.mul_(grad_loss).to(ctx.hidden_dtype).view(ctx.hidden_shape)
         return dh, None, None, None
 
 

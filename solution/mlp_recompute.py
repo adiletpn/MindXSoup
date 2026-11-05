@@ -17,7 +17,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from .mlp import _is_fp16_4bit
-from .swiglu import swiglu
+from .silu_mul import silu_mul
 
 patched_forward = previous_forward = None  # set by patch_qwen2_mlp_gateup_recompute()
 
@@ -44,7 +44,7 @@ def patch_qwen2_mlp_gateup_recompute():
                            for name in ("gate_proj", "up_proj", "down_proj"))):
             return previous(self, x)
         x16 = x.to(torch.float16)
-        hidden = checkpoint(lambda t: swiglu(self.gate_proj(t), self.up_proj(t)), x16,
+        hidden = checkpoint(lambda t: silu_mul(self.gate_proj(t), self.up_proj(t)), x16,
                             use_reentrant=False, preserve_rng_state=False)
         return self.down_proj(hidden).to(x.dtype)
 

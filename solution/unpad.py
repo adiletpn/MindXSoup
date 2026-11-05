@@ -21,10 +21,11 @@ import contextlib
 
 import torch
 
-from . import dropout
+from . import direct, dropout
 
 enabled = False  # set by patch_unpad()
 _rows = None  # (row lengths, batch, padded length, real-token index) during a packed forward
+_group_keep = None  # dropout module -> this group's kept elements, during a grouped rerun (recompute.py)
 
 
 def layout(attention_mask):
@@ -38,6 +39,16 @@ def layout(attention_mask):
     if not torch.equal(keep, right_padded) or int(lengths.min()) == 0:
         return None
     return lengths.tolist(), keep.reshape(-1).nonzero().squeeze(1)
+
+
+@contextlib.contextmanager
+def group_masks(keep):
+    global _group_keep
+    outer, _group_keep = _group_keep, keep
+    try:
+        yield
+    finally:
+        _group_keep = outer
 
 
 @contextlib.contextmanager
@@ -137,6 +148,9 @@ def patch_dropout_full_mask():
                 and torch.is_autocast_enabled("cuda") \
                 and torch.get_autocast_dtype("cuda") == torch.float16:
             out_dtype = torch.float16  # the cast lora_A's autocast would do next
+        if _group_keep is not None:
+            return direct.run(dropout.KeptDropout, x, _group_keep[self], 1.0 / (1.0 - self.p),
+                              out_dtype)
         return dropout.packed_dropout(x, self.p, batch, length, index, out_dtype)
 
     cls.forward = forward

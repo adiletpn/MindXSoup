@@ -86,6 +86,30 @@ def nf4_unpack_wide_kernel(packed_ptr, out_ptr, nf4_ptr, absmax_ptr, code_ptr, a
         tl.store(out, values, mask=live[:, None])
 
 
+@triton.jit
+def nf4_layer_kernel(packed_ptr, out_ptr, nf4_ptr, absmax_ptr, code_ptr, absmax2_ptr, offset_ptr,
+                     module_ptr, block0_ptr, scale0_ptr, BLOCKS: tl.constexpr):
+    # nf4_unpack_wide_kernel over all the 4-bit weights of a decoder layer, stored one after the
+    # other. One program stays inside one weight: module_ptr says which, and that weight's code
+    # book, second-level scales and offset are read with the same formula as the wide kernel.
+    pid = tl.program_id(0)
+    blk = pid * BLOCKS + tl.arange(0, BLOCKS)
+    word = tl.arange(0, 8)
+    words = tl.load(packed_ptr.to(tl.pointer_type(tl.int32)) + blk[:, None] * 8 + word[None, :])
+    module = tl.load(module_ptr + pid).to(tl.int32)
+    local = blk - tl.load(block0_ptr + module)
+    q8 = tl.load(absmax_ptr + blk).to(tl.int32)
+    scale = tl.load(code_ptr + module * 256 + q8) \
+        * tl.load(absmax2_ptr + tl.load(scale0_ptr + module) + local // 256)
+    scale = scale + tl.load(offset_ptr + module)
+    nib = tl.arange(0, 8)
+    shift = 8 * (nib // 2) + 4 * (1 - nib % 2)
+    q = (words[:, :, None] >> shift[None, None, :]) & 15
+    values = (tl.load(nf4_ptr + q) * scale[:, None, None]).to(out_ptr.dtype.element_ty)
+    values = tl.reshape(values, [BLOCKS, 64])
+    tl.store(out_ptr + blk[:, None] * 64 + tl.arange(0, 64)[None, :], values)
+
+
 _NF4_TABLE = {}
 
 
@@ -129,6 +153,13 @@ def unpack_nf4(packed, shape, absmax, blocksize, dtype, absmax_8bit=None, code=N
         absmax if nested else absmax, offset if nested else absmax,
         n_bytes, NESTED=nested, BYTES=BYTES_PER_PROGRAM, num_warps=4)
     return out
+
+
+def launch_layer(packed, out, absmax_8bit, code, absmax2, offset, module_of, block0, scale0):
+    """One launch: `out` (fp16) gets the values of all the weights packed one after the other."""
+    nf4_layer_kernel[(module_of.numel(),)](
+        packed, out, _nf4_table(packed.device), absmax_8bit, code, absmax2, offset,
+        module_of, block0, scale0, BLOCKS=WIDE_BLOCKS, num_warps=WIDE_WARPS)
 
 
 def _supported(packed, shape, blocksize, quant_type, dtype, nested_blocksize=256):
