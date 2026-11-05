@@ -151,6 +151,7 @@ class HostTable:
             yield col0, buffers[k][:min(SLICE, self.vocab - col0)]
             free[k] = torch.cuda.Event()
             free[k].record(compute)
+        self.buffers = None  # back to the allocator for the decoder's backward (the training peak)
 
     def gather(self, ids):
         """table[ids] on the GPU: the rows are gathered on the host, then copied."""
