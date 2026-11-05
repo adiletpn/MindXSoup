@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from . import direct
+
 @triton.jit
 def lora_dropout_kernel(src_ptr, drawn_ptr, index_ptr, keep_ptr, out_ptr, scale,
                         COLS: tl.constexpr, BLOCK: tl.constexpr, BACKWARD: tl.constexpr):
@@ -68,6 +70,7 @@ class PackedDropout(torch.autograd.Function):
 
 
 _ones = None
+KEEP_ONES = True  # False: a fresh buffer per draw, so nothing of the draw stays through the matmuls
 
 
 def ones_like_draw(batch, length, cols, dtype, device):
@@ -80,6 +83,8 @@ def ones_like_draw(batch, length, cols, dtype, device):
 
 
 def packed_dropout(x, p, batch, length, index, out_dtype):
-    drawn = torch.nn.functional.dropout(
-        ones_like_draw(batch, length, x.shape[2], x.dtype, x.device), p, True)
-    return PackedDropout.apply(x, drawn, index, 1.0 / (1.0 - p), out_dtype)
+    ones = ones_like_draw(batch, length, x.shape[2], x.dtype, x.device) if KEEP_ONES else \
+        torch.ones((batch, length, x.shape[2]), dtype=x.dtype, device=x.device)
+    drawn = torch.nn.functional.dropout(ones, p, True)
+    del ones
+    return direct.run(PackedDropout, x, drawn, index, 1.0 / (1.0 - p), out_dtype)
