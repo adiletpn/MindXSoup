@@ -58,6 +58,42 @@ def _slice_tokens(value, start, stop, n):
     if isinstance(value, tuple):
         return tuple(_slice_tokens(item, start, stop, n) for item in value)
     return value
+
+
+class GroupedLayer:
+    """A decoder layer's forward over a packed batch, one group of rows at a time.
+
+    Rows do not interact inside a layer: attention runs per row (unpad.py), norms and the MLP per
+    token, so each output row depends on its own input row and the shared weights only, and the
+    LoRA gradient of the layer is the sum over the rows. Running groups one after the other gives
+    the same outputs and gradients with the activations of one group alive at a time, so the peak
+    follows the longest group instead of the whole batch. The layer's dropout masks are drawn
+    once, before the groups, in the modules' order and shape, so the random numbers are the
+    base's; the groups only read their rows of the kept masks."""
+
+    def __init__(self, module, original, args, kwargs, rows, cap):
+        self.module, self.original, self.args, self.kwargs = module, original, args, kwargs
+        self.lengths, self.batch, self.length, self.index = rows
+        self.n = sum(self.lengths)
+        self.groups = row_groups(self.lengths, cap)
+        self.dropouts = [m for m in module.modules()
+                         if isinstance(m, torch.nn.Dropout) and m.p > 0]
+        self.returns_tuple = False
+
+    def masks(self, cols, dtype, device):
+        return {m: dropout.draw_keep(m.p, self.batch, self.length, cols, dtype, device, self.index)
+                for m in self.dropouts}
+
+    def run(self, hidden, group, masks):
+        first, end, start, stop = group
+        args = tuple(_slice_tokens(a, start, stop, self.n) for a in self.args)
+        kwargs = {k: _slice_tokens(v, start, stop, self.n) for k, v in self.kwargs.items()}
+        keep = {m: mask[start:stop] for m, mask in masks.items()}
+        with unpad.packed(self.lengths[first:end], self.batch, self.length,
+                          self.index[start:stop]), unpad.group_masks(keep):
+            out = self.original(self.module, hidden, *args, **kwargs)
+        self.returns_tuple = isinstance(out, tuple)
+        return out[0] if self.returns_tuple else out
 class Fp16InputCheckpoint(torch.autograd.Function):
     """Recompute a layer in backward from an fp16 copy of its fp32 input.
 
