@@ -149,10 +149,13 @@ def _compile_all(jobs):
     except (AttributeError, OSError):
         pass
     for job in jobs:
-        try:
-            job()
-        except Exception as exc:  # noqa: BLE001 - the real call compiles it instead
-            print(f"[mindx] warm-up of {job.__name__} skipped: {exc!r}", file=sys.stderr)
+        for attempt in (1, 2):  # a compile once failed inside MLIR in about 90 runs: try it again
+            try:
+                job()
+                break
+            except Exception as exc:  # noqa: BLE001 - after two, the real call compiles it instead
+                print(f"[mindx] warm-up of {job.__name__}, attempt {attempt}, failed: {exc!r}",
+                      file=sys.stderr)
 
 
 def start(jobs):
