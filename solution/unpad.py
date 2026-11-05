@@ -21,7 +21,7 @@ import contextlib
 
 import torch
 
-from . import dropout
+from . import direct, dropout
 
 enabled = False  # set by patch_unpad()
 _rows = None  # (row lengths, batch, padded length, real-token index) during a packed forward
@@ -148,6 +148,9 @@ def patch_dropout_full_mask():
                 and torch.is_autocast_enabled("cuda") \
                 and torch.get_autocast_dtype("cuda") == torch.float16:
             out_dtype = torch.float16  # the cast lora_A's autocast would do next
+        if _group_keep is not None:
+            return direct.run(dropout.KeptDropout, x, _group_keep[self], 1.0 / (1.0 - self.p),
+                              out_dtype)
         return dropout.packed_dropout(x, self.p, batch, length, index, out_dtype)
 
     cls.forward = forward
