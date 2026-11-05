@@ -111,6 +111,8 @@ def apply():
     if FEATURES["unpad"]:
         patch_unpad()  # used by the fused head's forward
     if FEATURES["recompute"]:
+        if FEATURES["recompute_no_rerun"]:
+            recompute.BUDGET_TOKENS = 1 << 30
         patch_qwen2_layer_recompute(fp16=FEATURES["recompute_fp16_inputs"],
                                     host=FEATURES["recompute_host_inputs"],
                                     offload_activations=FEATURES["offload_activations"],
