@@ -62,6 +62,25 @@ FEATURES = {
     "warmup": True,          # compile the kernels above in a background thread during model load
 }
 
+# Measured configurations. Only one runs; "rules_*" follow the challenge rules, "nolimits_*" are
+# experiments outside them (see README) and do not count as a submission.
+PROFILE = "rules_fast"
+_SPEED = {"nf4_cache_fp16": True, "lean_draw": False, "adam_host": False, "cublas_workspace": None, "mlp_gateup_recompute": False, "head_stream": False, "recompute": False,
+          "recompute_fp16_inputs": False, "recompute_host_inputs": False,
+          "stream_weights": False}
+PROFILES = {"rules_memory": {}, "rules_time": _SPEED,
+            "rules_balanced": {"recompute_group_tokens": 1024},
+            # the submission: all weights of a layer unpacked by one launch, no groups of rows
+            "rules_fast": {"recompute_group_tokens": 0, "layer_unpack": True},
+            "rules_fast_groups": {"recompute_group_tokens": 1024, "layer_unpack": True},
+            # at most 600 MiB, as fast as that allows
+            "rules_t600": {"recompute_group_tokens": 0, "head_slice": 8192},
+            # no layer reruns (activations stay on the GPU); weights and table on the host
+            "rules_mid": {"mlp_gateup_recompute": False, "recompute_fp16_inputs": False,
+                          "recompute_host_inputs": False, "recompute_group_tokens": 0,
+                          "recompute_no_rerun": True, "lean_draw": False}}
+FEATURES.update(PROFILES[PROFILE])
+
 
 def _warmup_jobs():
     """Our kernels in the order a training step first launches them."""
