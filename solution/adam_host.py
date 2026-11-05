@@ -51,3 +51,24 @@ class HostMoments:
         for (state, key), tensor in zip(moments, tensors):
             state[key] = self.host[start:start + tensor.numel()].view(tensor.shape)
             start += tensor.numel()
+
+
+def patch_adam_host():
+    cls = torch.optim.AdamW
+    if getattr(cls, "_mindx_host", False):
+        return
+    original = cls.__init__
+
+    def __init__(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        if torch.cuda.is_available() and all(
+                isinstance(p, torch.Tensor) and p.is_cuda
+                for group in self.param_groups for p in group["params"]) \
+                and not any(group.get("foreach") is False or group.get("fused")
+                            or group.get("amsgrad") for group in self.param_groups):
+            moments = HostMoments()
+            self.register_step_pre_hook(moments.before_step)
+            self.register_step_post_hook(moments.after_step)
+
+    cls.__init__ = __init__
+    cls._mindx_host = True
