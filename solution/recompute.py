@@ -300,10 +300,11 @@ def _backward_begins(layer):
         _stash.prefetch(layer - 1)
 
 
-def patch_qwen2_layer_recompute(fp16=False, host=False, offload_activations=False):
+def patch_qwen2_layer_recompute(fp16=False, host=False, offload_activations=False, group_tokens=0):
     from transformers.models.qwen2 import modeling_qwen2
 
-    global enabled, fp16_inputs, host_inputs, offload, BUDGET_TOKENS
+    global enabled, fp16_inputs, host_inputs, offload, BUDGET_TOKENS, GROUP_TOKENS
+    GROUP_TOKENS = group_tokens
     enabled = True
     fp16_inputs = fp16
     host_inputs = fp16 and host
@@ -352,6 +353,18 @@ def patch_qwen2_layer_recompute(fp16=False, host=False, offload_activations=Fals
             with unpad.packed(*rows):
                 return original(self, hidden, *args, **kwargs)
 
+        if (GROUP_TOKENS > 0 and rows is not None and fp16_inputs and host_inputs
+                and hidden_states.dtype == torch.float32 and hidden_states.shape[0] == 1
+                and len(rows[0]) > 1 and sum(rows[0]) > GROUP_TOKENS
+                and kwargs.get("use_cache") in (None, False)):
+            def hint(forward_pass):
+                if stream.active():
+                    stream.streamer().layer_begins(layer, forward=forward_pass)
+
+            grouped = GroupedLayer(self, original, args, kwargs, rows, GROUP_TOKENS)
+            anchor = torch.empty(0, device=hidden_states.device, requires_grad=True)
+            hidden = GroupedCheckpoint.apply(hidden_states, grouped, hint, anchor)
+            return (hidden,) if grouped.returns_tuple else hidden
         if fp16_inputs and hidden_states.dtype == torch.float32:
             form = {}
 
