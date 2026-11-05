@@ -122,6 +122,20 @@ class LayerStreamer:
                 first += 2 * numel
         return tables
 
+    def _unpack_layer(self, layer, slot):
+        if self.layer_tables is None or self.unpacked == layer:
+            return
+        data = self.slots[slot]
+        code, absmax2, offset = self.layer_tables[layer]
+        nf4.launch_layer(data[:self.packed_bytes], self.buffer,
+                         data[self.absmax_start:self.absmax_start + self.packed_bytes // 32],
+                         code, absmax2, offset, self.module_of, self.block0, self.scale0)
+        self.unpacked = layer
+
+    def weight_for(self, module):
+        """The module's unpacked fp16 weight when its layer is the one in the buffer, else None."""
+        return self.weights[id(module)] if self.entries[id(module)][0] == self.unpacked else None
+
     def _victim(self, keep):
         free = [i for i, layer in enumerate(self.slot_layer) if layer is None]
         if free:
@@ -185,7 +199,7 @@ class LayerStreamer:
             if not 0 <= layer < len(self.groups):
                 return
             self.current = layer
-            self._acquire(layer)
+            self._unpack_layer(layer, self._acquire(layer))
             step = 1 if forward else -1
             keep = {layer}
             for ahead in range(1, min(PREFETCH, len(self.slots) - 1) + 1):
