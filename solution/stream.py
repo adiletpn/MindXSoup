@@ -18,9 +18,12 @@ import threading
 
 import torch
 
+from . import nf4
+
 SLOTS = 2
 COALESCE_TRANSFERS = True
 PREFETCH = 2
+LAYER_UNPACK = True  # all weights of the running layer unpacked by one launch, into one fp16 buffer
 
 _streamer = None
 enabled = False  # set by patch_stream_layers()
@@ -68,6 +71,56 @@ class LayerStreamer:
         self.layer_slot = {}
         self.clock = 0
         self.current = None
+        self.unpacked = None  # the layer whose weights the buffer holds
+        self.weights = {}  # id(module) -> [N, K] fp16 view of the buffer
+        self.layer_tables = self._layer_tables() if LAYER_UNPACK else None
+
+    def _layer_tables(self):
+        """Per layer, what nf4_layer_kernel reads besides the bytes; None unless every layer is
+        the same list of nested NF4 weights of whole programs."""
+        shapes = [tuple(tuple(m.weight.quant_state.shape) for m in g) for g in self.groups]
+        if len(set(shapes)) != 1:
+            return None
+        device = self.slots[0].device
+        program_bytes = nf4.WIDE_BLOCKS * 32
+        module_of, block0, scale0, scales = [], [], [], 0
+        blocks = 0
+        for index, module in enumerate(self.groups[0]):
+            _, offset, numel, _, abs_offset, abs_numel = self.entries[id(module)]
+            state = module.weight.quant_state
+            if (numel % program_bytes or abs_numel * 32 != numel or offset != blocks * 32
+                    or abs_offset != self.entries[id(self.groups[0][0])][4] + blocks
+                    or state.state2.code.numel() != 256 or state.state2.code.dtype != torch.float32
+                    or state.state2.absmax.dtype != torch.float32 or state.offset.numel() != 1
+                    or state.dtype != torch.float16):
+                return None
+            module_of += [index] * (numel // program_bytes)
+            block0.append(blocks)
+            scale0.append(scales)
+            blocks += abs_numel
+            scales += state.state2.absmax.numel()
+        tables = []
+        for group in self.groups:
+            states = [m.weight.quant_state for m in group]
+            if any(s.state2.absmax.numel() != m.weight.quant_state.state2.absmax.numel()
+                   for s, m in zip(states, self.groups[0])):
+                return None
+            tables.append((torch.cat([s.state2.code.reshape(-1) for s in states]).to(device),
+                           torch.cat([s.state2.absmax.reshape(-1) for s in states]).to(device),
+                           torch.cat([s.offset.reshape(-1).float() for s in states]).to(device)))
+        self.module_of = torch.tensor(module_of, dtype=torch.int8, device=device)
+        self.block0 = torch.tensor(block0, dtype=torch.int32, device=device)
+        self.scale0 = torch.tensor(scale0, dtype=torch.int32, device=device)
+        self.packed_bytes, self.absmax_start = blocks * 32, self.entries[id(self.groups[0][0])][4]
+        self.buffer = torch.empty(blocks * 64, dtype=torch.float16, device=device)
+        for group in self.groups:
+            first = 0
+            for module in group:
+                numel = self.entries[id(module)][2]
+                shape = tuple(module.weight.quant_state.shape)
+                self.weights[id(module)] = self.buffer[first:first + 2 * numel].view(shape)
+                first += 2 * numel
+        return tables
 
     def _victim(self, keep):
         free = [i for i, layer in enumerate(self.slot_layer) if layer is None]
