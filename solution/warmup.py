@@ -22,6 +22,7 @@ HIDDEN, Q_HEADS, KV_HEADS, HEAD_DIM, INTERMEDIATE, VOCAB = 1536, 12, 2, 128, 896
 RMS_EPS = 1e-6
 
 _thread = None
+KEPT_MASKS = False  # set by apply(): dropout masks kept per group are in use
 
 
 def compile_rmsnorm():
@@ -84,7 +85,7 @@ def compile_nf4():
 
 
 def compile_lora_dropout():
-    from .dropout import PackedDropout
+    from .dropout import KeptDropout, PackedDropout
 
     tokens = 16
     x = torch.zeros(1, tokens, HIDDEN, device="cuda", requires_grad=True)
@@ -93,6 +94,21 @@ def compile_lora_dropout():
     # training: fp32 input, fp16 output for lora_A, fp16 gradient back
     out = PackedDropout.apply(x, drawn, index, 1.0 / 0.95, torch.float16)
     out.backward(torch.zeros(1, tokens, HIDDEN, dtype=torch.float16, device="cuda"))
+    if not KEPT_MASKS:
+        return
+    # groups of rows (recompute.py, microbatch.py): the mask already kept, both ways
+    keep = torch.ones(tokens, HIDDEN, dtype=torch.int8, device="cuda")
+    out = KeptDropout.apply(x, keep, 1.0 / 0.95, torch.float16)
+    out.backward(torch.zeros(1, tokens, HIDDEN, dtype=torch.float16, device="cuda"))
+
+
+def compile_silu_mul():
+    from .silu_mul import silu_mul
+
+    gate = torch.zeros(2, INTERMEDIATE, dtype=torch.float16, device="cuda", requires_grad=True)
+    up = torch.zeros(2, INTERMEDIATE, dtype=torch.float16, device="cuda", requires_grad=True)
+    silu_mul(gate * 1, up * 1).backward(torch.zeros(2, INTERMEDIATE, dtype=torch.float16,
+                                                    device="cuda"))
 
 
 def compile_example_swiglu():

@@ -77,6 +77,7 @@ def apply():
         import_bitsandbytes_without_compile_wrappers()  # first: peft and trl import it too
     # compile in the background from here on, while the rest of apply() imports and patches and
     # Soup loads the model; wait() runs in the fused head's forward before the first step
+    warmup.KEPT_MASKS = bool(FEATURES["recompute"] and FEATURES["recompute_group_tokens"])
     if FEATURES["warmup"]:
         warmup.start(_warmup_jobs())
     if FEATURES["startup_cache"]:
