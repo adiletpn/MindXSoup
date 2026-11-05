@@ -14,7 +14,7 @@ Saved activations per layer drop from 147 MB to 73 MB, and two fp32 round trips 
 
 import torch
 
-from .swiglu import swiglu
+from .silu_mul import silu_mul
 
 
 def _is_fp16_4bit(linear):
@@ -39,7 +39,7 @@ def patch_qwen2_mlp_fp16():
                            for name in ("gate_proj", "up_proj", "down_proj"))):
             return previous(self, x)
         x16 = x.to(torch.float16)
-        hidden = swiglu(self.gate_proj(x16), self.up_proj(x16))
+        hidden = silu_mul(self.gate_proj(x16), self.up_proj(x16))
         return self.down_proj(hidden).to(x.dtype)
 
     cls.forward = forward
