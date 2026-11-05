@@ -94,6 +94,62 @@ class GroupedLayer:
             out = self.original(self.module, hidden, *args, **kwargs)
         self.returns_tuple = isinstance(out, tuple)
         return out[0] if self.returns_tuple else out
+
+
+class GroupedCheckpoint(torch.autograd.Function):
+    """Fp16InputCheckpoint with the rerun, and the forward, done by groups of rows."""
+
+    @staticmethod
+    def forward(ctx, hidden, layer, hint, _anchor):
+        ctx.layer, ctx.hint = layer, hint
+        ctx.autocast = (torch.is_autocast_enabled("cuda"), torch.get_autocast_dtype("cuda"))
+        ctx.rng = torch.cuda.get_rng_state(hidden.device)
+        ctx.device, ctx.dtype = hidden.device, hidden.dtype
+        hint(True)
+        with torch.no_grad():
+            masks = layer.masks(hidden.shape[2], hidden.dtype, hidden.device)
+            out = torch.empty_like(hidden)
+            for group in layer.groups:
+                _, _, start, stop = group
+                out[:, start:stop] = layer.run(hidden[:, start:stop], group, masks)
+        if layer_input.fits(hidden):
+            half, scale = layer_input.pack(hidden)
+        else:
+            scale = hidden.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(1.0) / 32768.0
+            half = (hidden.detach() / scale).to(torch.float16)
+        host = torch.empty(half.shape, dtype=half.dtype, pin_memory=True)
+        host.copy_(half, non_blocking=True)  # on the compute stream, like Fp16InputCheckpoint
+        ctx.save_for_backward(host, scale)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        host, scale = ctx.saved_tensors
+        layer = ctx.layer
+        ctx.hint(False)
+        enabled, dtype = ctx.autocast
+        dx = torch.empty_like(grad, dtype=ctx.dtype) if ctx.needs_input_grad[0] else None
+        with torch.random.fork_rng(devices=[ctx.device]):
+            torch.cuda.set_rng_state(ctx.rng, ctx.device)
+            masks = layer.masks(grad.shape[2], ctx.dtype, ctx.device)
+            for group in layer.groups:
+                _, _, start, stop = group
+                half = host[:, start:stop].to(ctx.device, non_blocking=True)
+                if layer_input.enabled:
+                    hidden = layer_input.restore(half, scale[:, start:stop])
+                else:
+                    hidden = (half.float() * scale[:, start:stop]).to(ctx.dtype)
+                hidden.requires_grad_(True)
+                del half
+                with torch.enable_grad(), torch.autocast("cuda", dtype=dtype, enabled=enabled):
+                    out = layer.run(hidden, group, masks)
+                torch.autograd.backward(out, grad[:, start:stop])
+                if dx is not None:
+                    dx[:, start:stop] = hidden.grad
+                del out, hidden
+        return dx, None, None, None
+
+
 class Fp16InputCheckpoint(torch.autograd.Function):
     """Recompute a layer in backward from an fp16 copy of its fp32 input.
 
