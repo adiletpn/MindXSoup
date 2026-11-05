@@ -134,3 +134,135 @@ def sweep():
                 for a, b in zip(cuts, cuts[1:]):
                     torch.mm(x[a:b], w.t(), out=out[a:b])
             print(f"split N={n} pieces={pieces} {timed(run):.3f} ms", flush=True)
+
+
+def launchcost():
+    """CPU cost of each kind of call on this machine, and which calls wait for the GPU."""
+    import torch
+    import torch.nn.functional as F
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def probe(p, n, B: tl.constexpr):
+        i = tl.program_id(0) * n + tl.arange(0, B)
+        tl.store(p + i, tl.load(p + i) + 1.0)
+
+    d = "cuda"
+    n = 1000
+    x16 = torch.randn(1, n, 1536, dtype=torch.float16, device=d)
+    x32 = x16.float()
+    w = torch.randn(8640, 1536, dtype=torch.float16, device=d)
+    w_small = torch.randn(1536, 1536, dtype=torch.float16, device=d)
+    big = torch.randn(4096, 4096, dtype=torch.float16, device=d)
+    small = torch.zeros(1024, device=d)
+    q = torch.randn(1, 12, 300, 128, dtype=torch.float16, device=d)
+    pinned = torch.empty(4 << 20, dtype=torch.uint8, pin_memory=True)
+    slot = torch.empty(4 << 20, dtype=torch.uint8, device=d)
+    rng = torch.cuda.get_rng_state(0)
+    event = torch.cuda.Event()
+    event.record()
+    other = torch.cuda.Stream()
+    shapes = iter(range(1100, 100000))
+
+    def fresh_shape():
+        F.linear(torch.empty(1, next(shapes) % 1400 + 1, 1536, dtype=torch.float16, device=d), w)
+
+    def grad_node():
+        a = x32.detach().requires_grad_(True)
+        (a * 2.0).sum().backward()
+
+    def autocast_linear():
+        with torch.autocast("cuda", dtype=torch.float16):
+            F.linear(x16, w)
+
+    def fork():
+        with torch.random.fork_rng(devices=[0]):
+            torch.cuda.set_rng_state(rng, 0)
+
+    calls = {
+        "python no-op": lambda: None,
+        "empty fp16 [1,n,1536]": lambda: torch.empty_like(x16),
+        "view": lambda: x16.view(n, 1536),
+        "fill_ small": lambda: small.fill_(1.0),
+        "add_ small": lambda: small.add_(1.0),
+        "cast fp32->fp16": lambda: x32.to(torch.float16),
+        "triton launch small": lambda: probe[(1,)](small, 16, B=16),
+        "F.linear small weight, same shape": lambda: F.linear(x16, w_small),
+        "F.linear gate weight, same shape": lambda: F.linear(x16, w),
+        "F.linear, rows never seen": fresh_shape,
+        "F.linear under autocast": autocast_linear,
+        "matmul grad @ W": lambda: torch.matmul(x16[:, :, :8640 // 8640 * 1536], w_small),
+        "sdpa causal": lambda: F.scaled_dot_product_attention(q, q, q, is_causal=True),
+        "dropout draw": lambda: F.dropout(torch.ones(4, 512, 1536, device=d), 0.05, True),
+        "autograd mul+sum backward": grad_node,
+        "get_rng_state": lambda: torch.cuda.get_rng_state(0),
+        "set_rng_state": lambda: torch.cuda.set_rng_state(rng, 0),
+        "fork_rng + set": fork,
+        "Event.record": lambda: torch.cuda.Event().record(),
+        "wait_event": lambda: torch.cuda.current_stream().wait_event(event),
+        "pinned empty 4 MiB": lambda: torch.empty(4 << 20, dtype=torch.uint8, pin_memory=True),
+        "HtoD non_blocking 4 MiB": lambda: slot.copy_(pinned, non_blocking=True),
+        "pinned 4 MiB + DtoH": lambda: torch.empty(4 << 20, dtype=torch.uint8, pin_memory=True)
+        .copy_(slot, non_blocking=True),
+    }
+    for fn in calls.values():
+        fn()
+    torch.cuda.synchronize()
+    print(f"{'call':38s} {'cpu us':>9s} {'median':>9s} {'after long gemm us':>19s}")
+    for name, fn in calls.items():
+        times = []
+        for _ in range(200):
+            torch.cuda.synchronize()
+            t = time.perf_counter()
+            fn()
+            times.append(time.perf_counter() - t)
+        times.sort()
+        # a call issued right after a long GPU job: does it return at once, or wait for the job?
+        waits = []
+        for _ in range(5):
+            torch.cuda.synchronize()
+            torch.matmul(big, big)
+            torch.matmul(big, big)
+            t = time.perf_counter()
+            fn()
+            waits.append(time.perf_counter() - t)
+        waits.sort()
+        print(f"{name:38s} {sum(times) / len(times) * 1e6:9.1f} {times[100] * 1e6:9.1f} {waits[2] * 1e6:19.1f}")
+    torch.cuda.synchronize()
+    t = time.perf_counter()
+    torch.matmul(big, big)
+    torch.matmul(big, big)
+    torch.cuda.synchronize()
+    print(f"long job itself {(time.perf_counter() - t) * 1e6:.0f} us")
+
+
+def masks():
+    """Same random numbers from a cheaper dropout input? Compared bit for bit with fp32 ones."""
+    import torch
+
+    shape = (4, 512, 1536)
+    def draw(x):
+        torch.manual_seed(7)
+        torch.cuda.manual_seed(7)
+        return torch.nn.functional.dropout(x, 0.05, True) != 0
+    ref = draw(torch.ones(shape, device="cuda"))
+    print("kept share", ref.float().mean().item())
+    for name, x in (("fp16 ones", torch.ones(shape, dtype=torch.float16, device="cuda")),
+                    ("fp32 expanded", torch.ones(1, device="cuda").expand(shape)),
+                    ("fp16 expanded", torch.ones(1, dtype=torch.float16, device="cuda").expand(shape))):
+        try:
+            print(name, "identical:", torch.equal(draw(x), ref), flush=True)
+        except Exception as exc:
+            print(name, "error", repr(exc), flush=True)
+    state = torch.cuda.get_rng_state()
+    torch.cuda.set_rng_state(state)
+    a = torch.nn.functional.dropout(torch.ones(shape, device="cuda"), 0.05, True)
+    after_a = torch.cuda.get_rng_state()
+    torch.cuda.set_rng_state(state)
+    b = torch.nn.functional.dropout(torch.ones(1, dtype=torch.float16, device="cuda").expand(shape), 0.05, True)
+    print("rng state after equal:", torch.equal(after_a, torch.cuda.get_rng_state()), flush=True)
+
+
+if __name__ == "__main__":
+    {"gemm": gemm, "context": context, "sweep": sweep, "masks": masks, "launchcost": launchcost}[sys.argv[1]]()
