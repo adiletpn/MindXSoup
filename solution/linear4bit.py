@@ -19,6 +19,7 @@ from . import direct, stream
 from .nf4 import _supported, unpack_nf4
 
 _enabled = True
+cache_fp16 = False  # set by patch_bnb_linear4bit(cache_fp16=True): each weight unpacked once, kept in fp16
 
 
 @contextlib.contextmanager
@@ -128,7 +129,26 @@ def _direct_ok(layer, x):
             and not _bnb_picks_fused_kernel(x, state))
 
 
-def patch_bnb_linear4bit():
+def _cached_weight(layer, x):
+    """The module's weight unpacked once to fp16 and kept, while the packed bytes wait on the host
+    (same values as every per-use unpack, without the kernel, for 2 B per value of GPU memory
+    instead of 0.5 B). None unless this call would take the direct path."""
+    weight16 = layer.__dict__.get("_mindx_weight16")
+    if weight16 is None:
+        if not _direct_ok(layer, x):
+            return None
+        packed = layer.weight.data.view(-1, 1)
+        weight16 = _unpack(packed, layer.weight.quant_state, torch.float16)
+        layer.__dict__["_mindx_weight16"] = weight16
+        stream.offload(layer.weight, pin=False)  # only a call that needs bnb's kernel reads them now
+        return weight16
+    if not (_enabled and isinstance(x, torch.Tensor) and x.is_cuda and x.dtype == torch.float16
+            and x.numel() > 0 and x.shape[-1] == weight16.shape[1]):
+        return None
+    return weight16
+
+
+def patch_bnb_linear4bit(cache_weights=False):
     import bitsandbytes as bnb
 
     cls = bnb.nn.Linear4bit
